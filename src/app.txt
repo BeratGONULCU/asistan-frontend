@@ -1,0 +1,373 @@
+import { useEffect, useRef, useState } from "react";
+import { apiClient } from "./api/apiClient";
+import "./App.css";
+import { createPendingAsistanYanit } from "./api/asistanYanitService";
+import { createAsistanSession } from "./api/asistanSessionCreateService";
+
+type MessageRole = "user" | "assistant" | "system";
+
+type ChatMessage = {
+  id: number;
+  role: MessageRole;
+  text: string;
+};
+
+type PendingResult = {
+  requestId: string;
+  userInput: string;
+  generatedAnswer: string;
+};
+
+function App() {
+  const [keyboardMode, setKeyboardMode] = useState(false);
+  const [message, setMessage] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [pendingResult, setPendingResult] = useState<PendingResult | null>(
+    null,
+  );
+
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: 1,
+      role: "assistant",
+      text: "Merhaba, bir komut yazabilir veya mikrofon ile sesli komut verebilirsin.",
+    },
+  ]);
+
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  const addMessage = (role: MessageRole, text: string) => {
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: Date.now() + Math.random(),
+        role,
+        text,
+      },
+    ]);
+  };
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, pendingResult, isProcessing]);
+
+  const generateFakeAnswer = (input: string) => {
+    // Burayı sonra backend API'den gelen cevapla değiştireceğiz.
+    // Örnek:
+    // const response = await apiClient.post('/assistant/analyze', { text: input })
+    // return response.data.answer
+
+    return `"${input}" komutu analiz edildi. Açık Durumdaki Redmine Taskları getiriliyor.`;
+  };
+
+  const handleMicClick = () => {
+    setKeyboardMode(false);
+    setIsListening((prev) => !prev);
+
+    // Sonradan burada ses dinleme veya backend'e ses gönderme işlemi olacak.
+  };
+
+
+  // buraya bir kere basıldıktan sonra createcommandhandler çalışacak ve sohbet kaydı girilecek.
+  // sonrasında her komut için sendCommandHandler içerisine göndermeli.
+  const handleKeyboardClick = () => {
+    setKeyboardMode(true);
+    setIsListening(false);
+  };
+
+  const handleSend = async () => {
+    const trimmedMessage = message.trim();
+
+    if (!trimmedMessage || isProcessing) return;
+
+    addMessage("user", trimmedMessage);
+    setMessage("");
+    setIsProcessing(true);
+
+    try {
+      const result = await createPendingAsistanYanit(trimmedMessage);
+
+      console.log("Backend kayıt sonucu:", result);
+
+      addMessage(
+        "assistant",
+        "Mesaj PENDING olarak kaydedildi. Python agent bu kaydı işleyebilir.",
+      );
+
+      setKeyboardMode(false);
+    } catch (error: any) {
+      console.error("Backend hata detayı:", error);
+
+      if (error.response) {
+        console.error("Status:", error.response.status);
+        console.error("Data:", error.response.data);
+
+        addMessage(
+          "system",
+          `Backend hata verdi. Status: ${error.response.status}`,
+        );
+      } else if (error.request) {
+        addMessage(
+          "system",
+          "Backend cevap vermedi. Backend çalışıyor mu veya port doğru mu kontrol et.",
+        );
+      } else {
+        addMessage("system", "İstek oluşturulurken hata oluştu.");
+      }
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleSessionSend = async () => {
+    const trimmedMessage = message.trim();
+
+    if (!trimmedMessage || isProcessing) return;
+
+    addMessage("user", trimmedMessage);
+    setMessage("");
+    setIsProcessing(true);
+
+    try {
+      const result = await createPendingAsistanYanit(trimmedMessage);
+
+      console.log("Backend kayıt sonucu:", result);
+
+      addMessage(
+        "assistant",
+        "Mesaj PENDING olarak kaydedildi. Python agent bu kaydı işleyebilir.",
+      );
+
+      setKeyboardMode(false);
+    } catch (error: any) {
+      console.error("Backend hata detayı:", error);
+
+      if (error.response) {
+        console.error("Status:", error.response.status);
+        console.error("Data:", error.response.data);
+
+        addMessage(
+          "system",
+          `Backend hata verdi. Status: ${error.response.status}`,
+        );
+      } else if (error.request) {
+        addMessage(
+          "system",
+          "Backend cevap vermedi. Backend çalışıyor mu veya port doğru mu kontrol et.",
+        );
+      } else {
+        addMessage("system", "İstek oluşturulurken hata oluştu.");
+      }
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleConfirmYes = async () => {
+    if (!pendingResult) return;
+    // Burada backend'e kayıt isteği atılacak.
+    // Örnek:
+    // await apiClient.post('/assistant/confirm', {
+    //   userInput: pendingResult.userInput,
+    //   generatedAnswer: pendingResult.generatedAnswer,
+    //   isCorrect: true
+    // })
+    try {
+      // http://localhost:5131/Api/AsistanYanit/create-asistan-yanit
+      await apiClient.post(
+        `/assistant/text-command/${pendingResult.requestId}/confirm`,
+        {
+          isCorrect: true,
+        },
+      );
+
+      addMessage("system", "Cevap doğru olarak işaretlendi ve kayıt edildi.");
+      setPendingResult(null);
+      setKeyboardMode(false);
+    } catch (error) {
+      console.error(error);
+      addMessage("system", "Doğrulama kaydedilirken hata oluştu.");
+    }
+  };
+
+  const handleConfirmNo = async () => {
+    if (!pendingResult) return;
+    // Burada istersen backend'e yanlış cevap logu atabilirsin.
+    // Örnek:
+    // await apiClient.post('/assistant/confirm', {
+    //   userInput: pendingResult.userInput,
+    //   generatedAnswer: pendingResult.generatedAnswer,
+    //   isCorrect: false
+    // })
+    try {
+      await apiClient.post(
+        `/assistant/text-command/${pendingResult.requestId}/confirm`,
+        {
+          isCorrect: false,
+        },
+      );
+
+      addMessage("system", "Cevap yanlış olarak işaretlendi.");
+      addMessage("assistant", "Lütfen komutu daha açık şekilde tekrar yaz.");
+
+      setPendingResult(null);
+      setKeyboardMode(true);
+    } catch (error) {
+      console.error(error);
+      addMessage("system", "Doğrulama kaydedilirken hata oluştu.");
+    }
+  };
+
+  const handleInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      //handleSend();
+      handleSessionSend(); 
+    }
+
+    if (event.key === "Escape") {
+      setKeyboardMode(false);
+      setMessage("");
+    }
+  };
+
+  return (
+    <main className="assistant-page">
+      <section className="assistant-header">
+        <div className="assistant-orb">
+          <div
+            className={isListening ? "orb-ring listening" : "orb-ring"}
+          ></div>
+          <div className="orb-core"></div>
+        </div>
+
+        <div>
+          <h1>Şirket içi Sesli Asistan</h1>
+          <p>Komut gir, sistem analiz etsin, sonucu doğrula ve kaydet.</p>
+        </div>
+      </section>
+
+      <section className="chat-panel">
+        <div className="chat-messages">
+          {messages.map((item) => (
+            <div key={item.id} className={`message-row ${item.role}`}>
+              <div className="message-bubble">{item.text}</div>
+            </div>
+          ))}
+
+          {isProcessing && (
+            <div className="message-row assistant">
+              <div className="message-bubble typing-bubble">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
+            </div>
+          )}
+
+          {pendingResult && (
+            <div className="confirmation-card">
+              <p>Üretilen cevap doğru mu?</p>
+
+              <div className="confirmation-actions">
+                <button
+                  type="button"
+                  className="confirm-yes"
+                  onClick={handleConfirmYes}
+                >
+                  Evet, doğru
+                </button>
+
+                <button
+                  type="button"
+                  className="confirm-no"
+                  onClick={handleConfirmNo}
+                >
+                  Hayır, tekrar dene
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div ref={chatEndRef}></div>
+        </div>
+      </section>
+
+      <section className="bottom-control">
+        {!keyboardMode ? (
+          <div className="action-buttons">
+            <button
+              type="button"
+              className={isListening ? "mic-button active" : "mic-button"}
+              onClick={handleMicClick}
+              aria-label="Mikrofonu başlat"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="button-icon"
+                aria-hidden="true"
+              >
+                <path d="M12 14c1.66 0 3-1.34 3-3V6c0-1.66-1.34-3-3-3S9 4.34 9 6v5c0 1.66 1.34 3 3 3Z" />
+                <path d="M17.3 11c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.42 2.72 6.23 6.1 6.68V21h1.8v-3.32C16.28 17.23 19 14.42 19 11h-1.7Z" />
+              </svg>
+            </button>
+
+            <button
+              type="button"
+              className="keyboard-button"
+              onClick={handleKeyboardClick}
+              aria-label="Klavye ile yaz"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="button-icon"
+                aria-hidden="true"
+              >
+                <path d="M4 6h16c1.1 0 2 .9 2 2v8c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V8c0-1.1.9-2 2-2Zm0 2v8h16V8H4Zm2 2h2v2H6v-2Zm3 0h2v2H9v-2Zm3 0h2v2h-2v-2Zm3 0h2v2h-2v-2Zm3 0h1v2h-1v-2ZM6 13h2v1H6v-1Zm3 0h6v1H9v-1Zm7 0h3v1h-3v-1Z" />
+              </svg>
+            </button>
+          </div>
+        ) : (
+          <div className="text-command-box">
+            <input
+              autoFocus
+              type="text"
+              value={message}
+              onChange={(event) => setMessage(event.target.value)}
+              onKeyDown={handleInputKeyDown}
+              placeholder={
+                pendingResult
+                  ? "Önce cevabı doğru/yanlış olarak işaretle"
+                  : "Komut yaz... örn: Chrome’u aç"
+              }
+              disabled={isProcessing || !!pendingResult}
+            />
+
+            <button
+              type="button"
+              className="send-button"
+              onClick={handleSessionSend}
+              disabled={!message.trim() || isProcessing || !!pendingResult}
+            >
+              Gönder
+            </button>
+
+            <button
+              type="button"
+              className="close-button"
+              onClick={() => {
+                setKeyboardMode(false);
+                setMessage("");
+              }}
+              aria-label="Yazı modunu kapat"
+            >
+              ×
+            </button>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+export default App;
