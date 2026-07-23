@@ -9,6 +9,61 @@ import { cancelSession } from "./api/asistanCancelService";
 import { checkSession } from "./api/asistanCheckService";
 import { AsistanYanitTuru } from "./api/asistanChatService";
 import { handleApiError } from "./api/apiErrorHandler";
+import SettingsScreen, { type AppSettings } from "./screens/SettingsScreen";
+import {
+  GetAllAssistanSetting,
+  type AsistanSettingsResponse,
+} from "./api/systemSettingsService";
+
+const DEFAULT_SETTINGS: AppSettings = {
+  redmineToken: "",
+  wakeWord: "asistan",
+  deadWord: "kapat",
+  activeProvider: "gemini",
+  geminiApiKey: "",
+  geminiModel: "gemini-2.5-flash",
+  openAiApiKey: "",
+  openAiModel: "gpt-4o-mini",
+  ollamaModel: "llama3.1:8b",
+};
+
+const loadSettings = (): AppSettings => {
+  try {
+    const saved = JSON.parse(localStorage.getItem("asistan-settings") ?? "{}") as Partial<AppSettings> & { activeProvider?: string };
+    return {
+      ...DEFAULT_SETTINGS,
+      ...saved,
+      activeProvider: saved.activeProvider === "llama" ? "llama" : (saved.activeProvider ?? DEFAULT_SETTINGS.activeProvider) as AppSettings["activeProvider"],
+    };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+};
+
+const mapDatabaseSettings = (
+  saved: AsistanSettingsResponse,
+): AppSettings => {
+  const provider = saved.activeProvider?.toLowerCase();
+
+  return {
+    ...DEFAULT_SETTINGS,
+    redmineToken: saved.redmineToken ?? "",
+    wakeWord: saved.wakeWord ?? DEFAULT_SETTINGS.wakeWord,
+    deadWord: saved.deadWord ?? DEFAULT_SETTINGS.deadWord,
+    activeProvider:
+      provider === "llama" || provider === "openai" || provider === "gemini"
+        ? provider
+        : DEFAULT_SETTINGS.activeProvider,
+    geminiApiKey: saved.geminiApiKey ?? "",
+    geminiModel: saved.geminiModel ?? DEFAULT_SETTINGS.geminiModel,
+    openAiApiKey: saved.openAiApiKey ?? "",
+    openAiModel: saved.openAiModel ?? DEFAULT_SETTINGS.openAiModel,
+    ollamaModel: saved.ollamaModel ?? DEFAULT_SETTINGS.ollamaModel,
+    aiFallbackProvider: saved.aiFallbackProvider,
+    createdAt: saved.createdAt,
+    updatedAt: saved.updatedAt,
+  };
+};
 
 type MessageRole = "user" | "assistant" | "system";
 
@@ -37,7 +92,9 @@ function App() {
   const [pendingResult, setPendingResult] = useState<PendingResult | null>(
     null,
   );
-  const [screen, setScreen] = useState<"home" | "sessions">("home");
+  const [screen, setScreen] = useState<"home" | "sessions" | "settings">("home");
+  const [previousScreen, setPreviousScreen] = useState<"home" | "sessions">("home");
+  const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
   const [waitingExplanation, setWaitingExplanation] = useState(false);
   type WaitingFor = "TASK_ID" | "ACIKLAMA" | "SEARCH" | null;
@@ -56,6 +113,42 @@ function App() {
   };
 
   const [uiError, setUiError] = useState<UiError | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem("asistan-settings", JSON.stringify(settings));
+  }, [settings]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadDatabaseSettings = async () => {
+      try {
+        const response = await GetAllAssistanSetting();
+        const records = Array.isArray(response) ? response : [response];
+        const saved = records.at(-1);
+
+        if (isMounted && saved) {
+          setSettings(mapDatabaseSettings(saved));
+        }
+      } catch (error) {
+        console.error(
+          "Veritabanındaki ayarlar yüklenemedi; yerel ayarlar kullanılacak.",
+          error,
+        );
+      }
+    };
+
+    void loadDatabaseSettings();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const openSettings = () => {
+    if (screen !== "settings") setPreviousScreen(screen);
+    setScreen("settings");
+  };
 
   // # ID gerektirmeyen ve ek parametre gerektirmeyen iÅŸlemler listesi
   const WAITING_FOR = [
@@ -500,6 +593,18 @@ function App() {
 
   return (
     <main className="assistant-page">
+      <button
+        type="button"
+        className={`global-settings-button ${screen === "settings" ? "active" : ""}`}
+        onClick={openSettings}
+        aria-label="Ayarları aç"
+        title="Ayarlar"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.95 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.58 15 1.7 1.7 0 0 0 3 14H3v-4h.08A1.7 1.7 0 0 0 4.6 8.95a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.02V3h4v.08a1.7 1.7 0 0 0 1.05 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.82 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 21 10h.02v4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
+        </svg>
+      </button>
       {screen === "home" && (
         <div>
           <HomeScreen onOpenSessions={() => setScreen("sessions")} />
@@ -507,6 +612,14 @@ function App() {
       )}
       {screen === "sessions" && (
         <AsistanSessionsScreen onHome={() => setScreen("home")} />
+      )}
+      {screen === "settings" && (
+        <SettingsScreen
+          settings={settings}
+          onChange={setSettings}
+          onBack={() => setScreen(previousScreen)}
+          onReset={() => setSettings(DEFAULT_SETTINGS)}
+        />
       )}
 
       {screen === "home" && (

@@ -101,7 +101,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
         setSelectedSessionId(items[0].sessionID ?? null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Veri alinamadi.");
+      setError(err instanceof Error ? err.message : "Veri alınamadı.");
     } finally {
       setLoading(false);
     }
@@ -237,6 +237,19 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       return null;
     }
 
+    if (Array.isArray(parsed)) {
+      return {
+        id: null,
+        projectName: "",
+        items: parsed.map((item) =>
+          item && typeof item === "object"
+            ? (item as Record<string, unknown>)
+            : { value: item },
+        ),
+        restJson: "",
+      };
+    }
+
     const obj = parsed as Record<string, unknown>;
     const idValue = obj.id;
     const projectValue = obj.project;
@@ -244,6 +257,8 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
     delete rest.id;
     delete rest.project;
+    delete rest.issues;
+    delete rest.issueSummary;
 
     const projectName =
       projectValue && typeof projectValue === "object"
@@ -262,11 +277,16 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
         >[])
       : [];
 
+    const items = issues.length > 0 ? issues : issueSummary;
+    const hasCollection = issues.length > 0 || issueSummary.length > 0;
+
     return {
       id: idValue,
       projectName,
-      items: [...issues, ...issueSummary],
-      restJson: JSON.stringify(rest, null, 2),
+      items: hasCollection ? items : [obj],
+      restJson: hasCollection && Object.keys(rest).length > 0
+        ? JSON.stringify(rest, null, 2)
+        : "",
     };
   };
 
@@ -344,17 +364,26 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   };
 
   const filterModalItems = (items: Record<string, unknown>[]) => {
-    const search = modalSearch.trim().toLowerCase();
+    const normalizeSearchText = (value: string) =>
+      value
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase()
+        .replace(/ı/g, "i");
+
+    const searchTerms = normalizeSearchText(modalSearch.trim())
+      .split(/\s+/)
+      .filter(Boolean);
     const fromDate = modalDateFrom ? new Date(modalDateFrom) : null;
     const toDate = modalDateTo ? new Date(`${modalDateTo}T23:59:59.999`) : null;
 
     return items.filter((item) => {
-      const text = JSON.stringify(item).toLowerCase();
-      const matchesSearch = !search || text.includes(search);
+      const text = normalizeSearchText(JSON.stringify(item));
+      const matchesSearch = searchTerms.every((term) => text.includes(term));
 
       const itemDate = getDateValue(item);
-      const matchesFrom = !fromDate || !itemDate || itemDate >= fromDate;
-      const matchesTo = !toDate || !itemDate || itemDate <= toDate;
+      const matchesFrom = !fromDate || (!!itemDate && itemDate >= fromDate);
+      const matchesTo = !toDate || (!!itemDate && itemDate <= toDate);
 
       return matchesSearch && matchesFrom && matchesTo;
     });
@@ -471,11 +500,11 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
         <div className="sidebar-summary">
           <span>{groupedSessions.length} sohbet</span>
-          <span>{data.length} kayit</span>
+          <span>{data.length} kayıt</span>
         </div>
 
         <div className="session-list">
-          {loading && <div className="state-box">Yukleniyor...</div>}
+          {loading && <div className="state-box">Yükleniyor...</div>}
           {error && <div className="state-box error">{error}</div>}
 
           {!loading &&
@@ -521,7 +550,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
               className="session-show-more"
               onClick={() => setShowAllSessions((prev) => !prev)}
             >
-              {showAllSessions ? "Daha az goster" : "Devamini gor"}
+              {showAllSessions ? "Daha az göster" : "Devamını gör"}
             </button>
           )}
         </div>
@@ -530,11 +559,11 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       <main className="sessions-main">
         <div className="main-header">
           <div>
-            <p className="screen-label">Konusma Detayi</p>
+            <p className="screen-label">Konuşma Detayı</p>
             <h2>
               {selectedSession
                 ? selectedSession.sessionId
-                : "Secili sohbet yok"}
+                : "Seçili sohbet yok"}
             </h2>
           </div>
         </div>
@@ -546,7 +575,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
           onScroll={handleChatScroll}
         >
           {!selectedSession && !loading && !error && (
-            <div className="empty-state">Soldan bir sohbet sec.</div>
+            <div className="empty-state">Soldan bir sohbet seç.</div>
           )}
 
           {selectedSession?.messages
@@ -584,7 +613,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                         className="message-more-btn"
                         onClick={() => setExpandedMessage(item)}
                       >
-                        Devamini gor
+                        Devamını gör
                       </button>
                     )}
                     <div className="message-meta">
@@ -602,7 +631,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
             <div className="message-row assistant">
               <div
                 className="message-bubble typing-bubble"
-                aria-label="Yanit hazirlaniyor"
+                aria-label="Yanıt hazırlanıyor"
               >
                 <span></span>
                 <span></span>
@@ -764,7 +793,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                           >
                             <div className="modal-json-item-title">
                               {formatModalItemText(item) ||
-                                `Kayit ${index + 1}`}
+                                `Kayıt ${index + 1}`}
                             </div>
 
                             <pre className="modal-json-rest">
@@ -782,13 +811,16 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                       <div className="state-box">Eşleşen kayıt bulunamadı.</div>
                     )}
 
-                    {modalJson ? (
+                    {modalJson?.restJson &&
+                    !modalSearch &&
+                    !modalDateFrom &&
+                    !modalDateTo ? (
                       <pre className="modal-json-rest">
                         {modalJson.restJson}
                       </pre>
-                    ) : (
+                    ) : !modalJson ? (
                       <pre>{body.fullText}</pre>
-                    )}
+                    ) : null}
                   </div>
                 );
               })()}
