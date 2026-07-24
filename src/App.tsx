@@ -25,6 +25,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   openAiApiKey: "",
   openAiModel: "gpt-4o-mini",
   ollamaModel: "llama3.1:8b",
+  voiceInputEnabled: false,
 };
 
 const loadSettings = (): AppSettings => {
@@ -59,6 +60,8 @@ const mapDatabaseSettings = (
     openAiApiKey: saved.openAiApiKey ?? "",
     openAiModel: saved.openAiModel ?? DEFAULT_SETTINGS.openAiModel,
     ollamaModel: saved.ollamaModel ?? DEFAULT_SETTINGS.ollamaModel,
+    voiceInputEnabled:
+      saved.voiceInputEnabled ?? DEFAULT_SETTINGS.voiceInputEnabled,
     aiFallbackProvider: saved.aiFallbackProvider,
     createdAt: saved.createdAt,
     updatedAt: saved.updatedAt,
@@ -89,6 +92,7 @@ function App() {
   const [message, setMessage] = useState("");
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const requestAbortControllerRef = useRef<AbortController | null>(null);
   const [pendingResult, setPendingResult] = useState<PendingResult | null>(
     null,
   );
@@ -150,7 +154,7 @@ function App() {
     setScreen("settings");
   };
 
-  // # ID gerektirmeyen ve ek parametre gerektirmeyen iÅŸlemler listesi
+  // # ID gerektirmeyen ve ek parametre gerektirmeyen işlemler listesi
   const WAITING_FOR = [
     "SEARCH",
     "SEARCH-ERROR",
@@ -166,9 +170,12 @@ function App() {
 
   function HomeScreen({ onOpenSessions }: { onOpenSessions: () => void }) {
     return (
-      <div>
-        <button onClick={onOpenSessions}>Sohbetler</button>
-      </div>
+      <nav className="assistant-nav" aria-label="Ana menü">
+        <button className="assistant-nav-button" onClick={onOpenSessions}>
+          <span aria-hidden="true">☰</span>
+          Sohbetler
+        </button>
+      </nav>
     );
   }
 
@@ -244,7 +251,18 @@ function App() {
     };
   };
 
+  const isJsonMessage = (value: string) => {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed !== null && typeof parsed === "object";
+    } catch {
+      return false;
+    }
+  };
+
   const handleMicClick = () => {
+    if (!settings.voiceInputEnabled) return;
+
     setKeyboardMode(false);
     setIsListening((prev) => !prev);
 
@@ -346,6 +364,8 @@ function App() {
     addMessage("user", trimmedMessage);
     setMessage("");
     setIsProcessing(true);
+    const requestController = new AbortController();
+    requestAbortControllerRef.current = requestController;
 
     try {
       const yanitTuruToSend =
@@ -361,6 +381,7 @@ function App() {
         trimmedMessage,
         yanitTuruToSend,
         currentSessionId,
+        requestController.signal,
       );
 
       console.log("Asistan chat sonucu:", result);
@@ -393,7 +414,10 @@ function App() {
       const asistanText =
         formatAssistantResponse(result.assistantResponse) ||
         formatAssistantResponse(result.message) ||
-        (await loadLatestAssistantTextForSession(result.sessionId));
+        (await loadLatestAssistantTextForSession(
+          result.sessionId,
+          requestController.signal,
+        ));
 
       addMessage("assistant", asistanText || "Asistan boş cevap döndürdü.");
       
@@ -413,6 +437,11 @@ function App() {
 
       setKeyboardMode(true);
     } catch (error: unknown) {
+      if (requestController.signal.aborted) {
+        addMessage("system", "İstek iptal edildi.");
+        return;
+      }
+
       console.error("Asistan chat hatası:", error);
 
       const handledError = handleApiError(error);
@@ -421,11 +450,20 @@ function App() {
 
       addMessage("system", `${handledError.title}: ${handledError.message}`);
     } finally {
-      setIsProcessing(false);
+      if (requestAbortControllerRef.current === requestController) {
+        requestAbortControllerRef.current = null;
+        setIsProcessing(false);
+      }
     }
   };
 
+  const handleCancelRequest = () => {
+    requestAbortControllerRef.current?.abort();
+  };
+
   const handleNewChat = () => {
+    requestAbortControllerRef.current?.abort();
+    requestAbortControllerRef.current = null;
     setCurrentSessionId(null);
     setMessages([
       {
@@ -492,8 +530,14 @@ function App() {
     return String(response);
   };
 
-  const loadLatestAssistantTextForSession = async (sessionId: number) => {
-    const response = await fetch("http://localhost:5131/Api/AsistanYanit/Get-All");
+  const loadLatestAssistantTextForSession = async (
+    sessionId: number,
+    signal?: AbortSignal,
+  ) => {
+    const response = await fetch(
+      "http://localhost:5131/Api/AsistanYanit/Get-All",
+      { signal },
+    );
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -632,20 +676,43 @@ function App() {
           <div className="orb-core"></div>
         </div>
 
-        <div>
+        <div className="assistant-header-content">
+          <span className="assistant-kicker">Dijital çalışma asistanı</span>
           <h1>Şirket içi Sesli Asistan</h1>
           <p>
             Komut gir, sistem analiz etsin, sonucu doğrula ve kaydet.
-            {currentSessionId ? ` Aktif Session ID: ${currentSessionId}` : ""}
           </p>
 
-          <button type="button" className="home-btn" onClick={handleNewChat}>
-            Yeni Sohbet
-          </button>
+          <div className="assistant-header-meta">
+            <span className={`assistant-status ${isProcessing ? "busy" : ""}`}>
+              <i aria-hidden="true"></i>
+              {isProcessing ? "Yanıt hazırlanıyor" : "Hazır"}
+            </span>
+            {currentSessionId && (
+              <span className="assistant-session-id">
+                Oturum #{currentSessionId}
+              </span>
+            )}
+            <button
+              type="button"
+              className="new-chat-button"
+              onClick={handleNewChat}
+            >
+              <span aria-hidden="true">＋</span>
+              Yeni sohbet
+            </button>
+          </div>
         </div>
       </section>
 
       <section className="chat-panel">
+        <div className="chat-panel-header">
+          <div>
+            <strong>Sohbet</strong>
+            <span>{messages.length} mesaj</span>
+          </div>
+          <span className="chat-panel-hint">Mesaj detayları için “Devamını gör”ü kullan</span>
+        </div>
         {uiError && (
           <div className="error-alert" role="alert">
             <div className="error-alert-content">
@@ -677,18 +744,21 @@ function App() {
                 style={{ whiteSpace: "pre-wrap" }}
               >
                 {(() => {
-                  const preview = getPreviewText(item.text);
+                  const containsJson = isJsonMessage(item.text);
+                  const preview = getPreviewText(
+                    containsJson ? "Yapılandırılmış sonuç hazır." : item.text,
+                  );
 
                   return (
                     <>
                       <div className="message-text">{preview.text}</div>
-                      {preview.isTruncated && (
+                      {(preview.isTruncated || containsJson) && (
                         <button
                           type="button"
                           className="message-more-btn"
                           onClick={() => setExpandedMessage(item)}
                         >
-                          Devamını gör
+                          {containsJson ? "Detayı gör" : "Devamını gör"}
                         </button>
                       )}
                     </>
@@ -793,7 +863,17 @@ function App() {
               type="button"
               className={isListening ? "mic-button active" : "mic-button"}
               onClick={handleMicClick}
-              aria-label="Mikrofonu başlat"
+              disabled={!settings.voiceInputEnabled}
+              aria-label={
+                settings.voiceInputEnabled
+                  ? "Mikrofonu başlat"
+                  : "Sesli komut ayarlardan devre dışı bırakılmış"
+              }
+              title={
+                settings.voiceInputEnabled
+                  ? "Mikrofonu başlat"
+                  : "Sesli komutu Ayarlar ekranından etkinleştirin"
+              }
             >
               <svg
                 viewBox="0 0 24 24"
@@ -854,6 +934,7 @@ function App() {
                 type="button"
                 className="close-button"
                 onClick={() => {
+                  handleCancelRequest();
                   setKeyboardMode(false);
                   setMessage("");
                   void handleCancelSession(); // burada session iptali olacak ve sohbet kapatılacak. sphbet mesajı attığında eğer ki session kapalı ise açıcak.
@@ -866,12 +947,10 @@ function App() {
               <button
                 type="button"
                 className="stop-button"
-                onClick={() => {
-                  setIsProcessing(false);
-                  //void handleCancelSession(); --> burada sadece o anki işlemi iptal ettirmek gerekiyor
-                }}
-                aria-label="Anlık durdur"
-                title="Anlık durdur"
+                onClick={handleCancelRequest}
+                disabled={!isProcessing}
+                aria-label="İsteği iptal et"
+                title={isProcessing ? "İsteği iptal et" : "Aktif istek yok"}
               >
                 <span className="stop-icon"></span>
               </button>

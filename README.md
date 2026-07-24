@@ -1,75 +1,212 @@
-# React + TypeScript + Vite
+# Gemini Asistan Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Şirket içi operasyonları doğal dil komutlarıyla yönetmek için geliştirilen web tabanlı asistanın kullanıcı arayüzüdür. Kullanıcı mesajlarını backend servisine iletir, asistan yanıtlarını sohbet ekranında gösterir ve geçmiş oturumların incelenmesini sağlar.
 
-Currently, two official plugins are available:
+Proje React, TypeScript ve Vite kullanılarak geliştirilmiştir.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Özellikler
 
-## React Compiler
+- Metin veya sesli komut girişi
+- Oturum bazlı asistan sohbetleri
+- Devam eden isteği iptal etme
+- Geçmiş sohbetleri listeleme ve görüntüleme
+- Sohbetleri ilk kullanıcı komutuna göre adlandırma
+- Uzun mesajlar için detay modalı
+- JSON yanıtlarını okunabilir alan–değer görünümüne dönüştürme
+- JSON içeriklerinde arama ve tarih filtresi
+- Gemini, OpenAI ve yerel Ollama provider desteği
+- Ollama kurulum ve çalışma durumu kontrolü
+- Redmine bağlantı ayarları
+- Ayarları PostgreSQL üzerindeki backend yapılandırmasıyla eşitleme
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Kullanılan Teknolojiler
 
-## Expanding the ESLint configuration
+| Teknoloji | Kullanım amacı |
+|---|---|
+| React 19 | Kullanıcı arayüzü |
+| TypeScript | Tip güvenliği |
+| Vite | Geliştirme sunucusu ve production build |
+| Axios | Backend API istekleri |
+| React Router | İstemci tarafı yönlendirme altyapısı |
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Sistem Yapısı
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
+```text
+Kullanıcı
+   │
+   ▼
+React Frontend (localhost:5173)
+   │
+   ▼
+GeminiAsistanBackend API (localhost:5131)
+   ├── PostgreSQL
+   ├── Python asistan servisi
+   ├── Redmine
+   └── Gemini / OpenAI / Ollama
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Bu repository yalnızca frontend uygulamasını içerir. Sohbetlerin çalışması ve ayarların veritabanından yüklenebilmesi için `GeminiAsistanBackend` servisinin de çalışıyor olması gerekir.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Gereksinimler
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+- [Node.js](https://nodejs.org/) 20.19 veya üzeri
+- npm
+- Çalışır durumda `GeminiAsistanBackend`
+- Backend özelliklerine göre PostgreSQL ve Python asistan servisi
+- Yerel model kullanılacaksa [Ollama](https://ollama.com/)
 
+## Kurulum
+
+Repository'yi klonlayın:
+
+```bash
+git clone <repository-url>
+cd asistan-frontend
 ```
+
+Bağımlılıkları yükleyin:
+
+```bash
+npm install
+```
+
+Backend servisinin aşağıdaki adreste çalıştığından emin olun:
+
+```text
+http://localhost:5131
+```
+
+Frontend geliştirme sunucusunu başlatın:
+
+```bash
+npm run dev
+```
+
+Tarayıcıdan aşağıdaki adresi açın:
+
+```text
+http://localhost:5173
+```
+
+Windows PowerShell script çalıştırma kısıtlaması nedeniyle `npm` komutu çalışmazsa:
+
+```powershell
+npm.cmd install
+npm.cmd run dev
+```
+
+## Production Build
+
+Production çıktısı oluşturmak için:
+
+```bash
+npm run build
+```
+
+Oluşturulan `dist` klasörünü yerel olarak kontrol etmek için:
+
+```bash
+npm run preview
+```
+
+Kod kalitesi kontrolü:
+
+```bash
+npm run lint
+```
+
+## Backend Bağlantısı
+
+API istemcisinin varsayılan adresi:
+
+```text
+http://localhost:5131/Api
+```
+
+Bu değer şu dosyada tanımlıdır:
+
+```text
+src/api/apiClient.ts
+```
+
+Vite geliştirme sunucusu `/Api` isteklerini aynı backend adresine yönlendirecek şekilde yapılandırılmıştır.
+
+> Backend farklı bir portta çalışacaksa `src/api/apiClient.ts`, `vite.config.ts` ve doğrudan URL kullanılan servis dosyaları birlikte güncellenmelidir.
+
+## Ayarlar
+
+Ayarlar ekranı aşağıdaki yapılandırmaları yönetir:
+
+| Alan | Açıklama | Varsayılan |
+|---|---|---|
+| Redmine token | Redmine API erişim anahtarı | Boş |
+| Uyandırma kelimesi | Sesli asistanı etkinleştiren kelime | `asistan` |
+| Kapatma kelimesi | Sesli asistanı kapatan kelime | `kapat` |
+| Sesli komut girişi | Mikrofon özelliğini açar veya kapatır | Kapalı |
+| Aktif provider | Kullanılacak yapay zekâ sağlayıcısı | Gemini |
+| Gemini model | Gemini model adı | `gemini-2.5-flash` |
+| OpenAI model | OpenAI model adı | `gpt-4o-mini` |
+| Ollama model | Yerel Ollama model adı | `llama3.1:8b` |
+| Fallback provider | Ana provider kullanılamazsa alternatif | Ollama |
+
+“Ayarları doğrula” işlemi veritabanında kayıt yoksa yeni kayıt oluşturur, kayıt varsa mevcut kaydı günceller. “Varsayılanlara dön” yalnızca formu varsayılan değerlere çevirir; veritabanındaki kaydı silmez.
+
+## Proje Yapısı
+
+```text
+src/
+├── api/                       # Axios istemcisi ve API servisleri
+├── screens/
+│   ├── AsistanSessionsScreen.tsx
+│   └── SettingsScreen.tsx
+├── style/                     # Ekranlara ait CSS dosyaları
+├── App.tsx                    # Ana sohbet ekranı ve uygulama durumu
+├── App.css
+└── main.tsx                   # Uygulama başlangıç noktası
+```
+
+## Temel Komutlar
+
+| Komut | Açıklama |
+|---|---|
+| `npm run dev` | Geliştirme sunucusunu başlatır |
+| `npm run build` | TypeScript kontrolü ve production build çalıştırır |
+| `npm run preview` | Production çıktısını yerel olarak sunar |
+| `npm run lint` | ESLint kontrolünü çalıştırır |
+
+## Sorun Giderme
+
+### Backend'e ulaşılamıyor
+
+- Backend'in `http://localhost:5131` adresinde çalıştığını kontrol edin.
+- Backend CORS yapılandırmasında `http://localhost:5173` adresine izin verildiğini doğrulayın.
+- Tarayıcının Network sekmesindeki başarısız isteği inceleyin.
+
+### Ayarlar yenilemeden sonra yüklenmiyor
+
+- `GET /Api/AssistanSettings/Get-All` endpoint'ini kontrol edin.
+- PostgreSQL bağlantısının ve `asistan_settings` kaydının mevcut olduğundan emin olun.
+
+### Ollama kullanılamıyor
+
+- Ollama'nın kurulu ve servisinin çalışıyor olduğunu kontrol edin.
+- Ayarlardaki model adının yerel model adıyla aynı olduğundan emin olun.
+- Gerekirse terminalde `ollama list` komutunu çalıştırın.
+
+### PowerShell npm çalıştırmıyor
+
+PowerShell execution policy nedeniyle `npm.ps1` engellenirse komutları `npm.cmd` ile çalıştırın:
+
+```powershell
+npm.cmd run dev
+```
+
+## Güvenlik Notları
+
+- API anahtarlarını ve Redmine token'ını repository'ye eklemeyin.
+- Production ortamında backend URL'sini ortam değişkenleri üzerinden yönetmek önerilir.
+- Gizli ayarların loglara veya ekran görüntülerine dahil edilmediğinden emin olun.
+
+## Lisans
+
+Bu repository için henüz bir lisans dosyası tanımlanmamıştır. Proje herkese açık yayınlanacaksa uygun bir `LICENSE` dosyası eklenmelidir.

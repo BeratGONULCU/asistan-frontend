@@ -38,6 +38,7 @@ export const sendAsistanChatMessage = async (
   message: string,
   asistanYanitTuru: AsistanYanitTuru,
   sessionId: number | null,
+  signal?: AbortSignal,
 ) => {
   const payload: AsistanChatRequest = {
     message,
@@ -48,6 +49,7 @@ export const sendAsistanChatMessage = async (
   const response = await apiClient.post<AsistanChatResponse>(
     "/AsistanChat/send",
     payload,
+    { signal },
   );
 
   return response.data;

@@ -35,3 +35,11 @@ export const createPendingAsistanYanit = async (
 
   return response.data
 }
+
+export const deleteAsistanSession = async (sessionId: number) => {
+  const response = await apiClient.delete<boolean>(
+    `/AsistanYanit/delete-session/${sessionId}`,
+  )
+
+  return response.data
+}

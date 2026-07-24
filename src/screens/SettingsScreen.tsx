@@ -22,6 +22,7 @@ export type AppSettings = {
   openAiApiKey: string;
   openAiModel: string;
   ollamaModel: string;
+  voiceInputEnabled: boolean;
   aiFallbackProvider?: string;
   createdAt?: Date;
   updatedAt?: Date;
@@ -122,6 +123,7 @@ export default function SettingsScreen({
         openAiApiKey: settings.openAiApiKey,
         openAiModel: settings.openAiModel,
         ollamaModel: settings.ollamaModel,
+        voiceInputEnabled: settings.voiceInputEnabled,
         aiFallbackProvider: settings.aiFallbackProvider ?? "OLLAMA",
       });
 
@@ -153,6 +155,7 @@ export default function SettingsScreen({
         openAiApiKey: settings.openAiApiKey,
         openAiModel: settings.openAiModel,
         ollamaModel: settings.ollamaModel,
+        voiceInputEnabled: settings.voiceInputEnabled,
         aiFallbackProvider: settings.aiFallbackProvider ?? "OLLAMA",
       });
 
@@ -261,7 +264,7 @@ export default function SettingsScreen({
               </div>
             </label>
 
-            <div className="provider-settings">
+            <div className="compact-word-settings">
               <label className="settings-field">
                 <span>Uyandırma kelimesi</span>
                 <input
@@ -282,6 +285,23 @@ export default function SettingsScreen({
                 />
               </label>
             </div>
+
+            <label className="voice-input-setting">
+              <span>
+                <strong>Sesli komut girişi</strong>
+                <small>
+                  Mikrofon ile komut gönderme özelliğini etkinleştirir.
+                </small>
+              </span>
+              <input
+                type="checkbox"
+                checked={settings.voiceInputEnabled}
+                onChange={(e) =>
+                  updateSetting("voiceInputEnabled", e.target.checked)
+                }
+              />
+              <i aria-hidden="true"></i>
+            </label>
 
             <fieldset className="provider-fieldset">
               <legend>Aktif provider</legend>

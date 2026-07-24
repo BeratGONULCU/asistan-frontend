@@ -18,6 +18,7 @@ export type CreateAsistanSettingsRequest = {
   openAiApiKey: string;
   openAiModel: string;
   ollamaModel: string;
+  voiceInputEnabled: boolean;
   aiFallbackProvider: string;
 };
 
@@ -38,6 +39,7 @@ export type AsistanSettingsResponse = {
   openAiApiKey?: string;
   openAiModel?: string;
   ollamaModel?: string;
+  voiceInputEnabled?: boolean;
   aiFallbackProvider?: string;
   createdAt?: Date;
   updatedAt?: Date;

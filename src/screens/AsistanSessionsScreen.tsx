@@ -1,9 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 import {
   AsistanYanitTuru,
   sendAsistanChatMessage,
 } from "../api/asistanChatService";
+import { cancelSession } from "../api/asistanCancelService";
+import { deleteAsistanSession } from "../api/asistanYanitService";
 
 import "../style/AsistanSessionsScreen.css";
 
@@ -30,6 +33,141 @@ type TruncatedMessage = {
   isTruncated: boolean;
 };
 
+const FIELD_LABELS: Record<string, string> = {
+  id: "ID",
+  issueId: "Görev ID",
+  issue_id: "Görev ID",
+  subject: "Başlık",
+  title: "Başlık",
+  description: "Açıklama",
+  project: "Proje",
+  projectName: "Proje",
+  project_name: "Proje",
+  status: "Durum",
+  statusName: "Durum",
+  status_name: "Durum",
+  priority: "Öncelik",
+  assignedTo: "Atanan kişi",
+  assigned_to: "Atanan kişi",
+  author: "Oluşturan",
+  createdAt: "Oluşturulma tarihi",
+  created_on: "Oluşturulma tarihi",
+  updatedAt: "Güncellenme tarihi",
+  updated_on: "Güncellenme tarihi",
+  start_date: "Başlangıç tarihi",
+  due_date: "Bitiş tarihi",
+  estimated_hours: "Tahmini süre",
+  spent_hours: "Harcanan süre",
+  done_ratio: "Tamamlanma oranı",
+  total_count: "Toplam kayıt",
+  calisacakKod: "Çalışacak kod",
+  issues: "Görevler",
+  type: "Veri türü",
+  limit: "Limit",
+  offset: "Başlangıç",
+  domain: "Alan",
+  target: "Hedef",
+  operation: "İşlem",
+  confidence: "Güven oranı",
+  params: "Parametreler",
+  redmine_action: "Redmine işlemi",
+  name: "Ad",
+  value: "Değer",
+  requiresInput: "Durum",
+  waitingFor: "Beklenen bilgi",
+};
+
+const FRIENDLY_VALUES: Record<string, string> = {
+  DAILYREPORT: "Rapor tarihi bekleniyor",
+  TASK_ID: "Görev seçimi bekleniyor",
+  ACIKLAMA: "Açıklama bekleniyor",
+  SEARCH: "Arama bilgisi bekleniyor",
+  generate_daily_report: "Günlük rapor oluştur",
+  error: "İşlem tamamlanamadı",
+  command: "Komut",
+  chat: "Sohbet",
+};
+
+const formatFieldLabel = (key: string) => {
+  if (FIELD_LABELS[key]) return FIELD_LABELS[key];
+
+  const readable = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .trim();
+
+  return readable
+    ? readable.charAt(0).toLocaleUpperCase("tr-TR") + readable.slice(1)
+    : key;
+};
+
+const formatScalarValue = (value: unknown) => {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "boolean") return value ? "Evet" : "Hayır";
+  if (typeof value === "string" && FRIENDLY_VALUES[value]) {
+    return FRIENDLY_VALUES[value];
+  }
+
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}T/.test(value)) {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) {
+      return date.toLocaleString("tr-TR");
+    }
+  }
+
+  return String(value);
+};
+
+const renderReadableValue = (value: unknown): ReactNode => {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="modal-empty-value">Yok</span>;
+
+    return (
+      <div className="modal-readable-array">
+        {value.map((entry, index) => (
+          <div className="modal-readable-nested" key={index}>
+            {renderReadableValue(entry)}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (value && typeof value === "object") {
+    const visibleEntries = Object.entries(
+      value as Record<string, unknown>,
+    ).filter(([, nestedValue]) => {
+      if (nestedValue === null || nestedValue === undefined || nestedValue === "") {
+        return false;
+      }
+      if (Array.isArray(nestedValue)) return nestedValue.length > 0;
+      if (typeof nestedValue === "object") {
+        return Object.keys(nestedValue as object).length > 0;
+      }
+      return true;
+    });
+
+    return (
+      <div className="modal-readable-fields">
+        {visibleEntries.map(
+          ([key, nestedValue]) => (
+            <div className="modal-readable-row" key={key}>
+              <div className="modal-readable-label">
+                {formatFieldLabel(key)}
+              </div>
+              <div className="modal-readable-value">
+                {renderReadableValue(nestedValue)}
+              </div>
+            </div>
+          ),
+        )}
+      </div>
+    );
+  }
+
+  return formatScalarValue(value);
+};
+
 type Props = {
   onHome: () => void;
 };
@@ -41,12 +179,10 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
     null,
   );
-  const [isNewChat, setIsNewChat] = useState(true);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [sendError, setSendError] = useState("");
-  const [showAllSessions, setShowAllSessions] = useState(false);
+  const [visibleSessionCount, setVisibleSessionCount] = useState(5);
   const [expandedMessage, setExpandedMessage] = useState<AsistanYanit | null>(
     null,
   );
@@ -54,19 +190,35 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   const [modalDateFrom, setModalDateFrom] = useState("");
   const [modalDateTo, setModalDateTo] = useState("");
   const [isCopied, setIsCopied] = useState(false);
+  const [sessionSearch, setSessionSearch] = useState("");
+  const [archivedSessionIds, setArchivedSessionIds] = useState<string[]>([]);
+  const [openSessionMenuId, setOpenSessionMenuId] = useState<string | null>(null);
+  const [sessionMenuPosition, setSessionMenuPosition] = useState({
+    top: 0,
+    left: 0,
+  });
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [messageFeedback, setMessageFeedback] = useState<
+    Record<number, "positive" | "negative">
+  >({});
+  const [newMessageCount, setNewMessageCount] = useState(0);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
   // bu kısım smoothscroll olduğunda nereye gideceğini göstermek için
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
   const targetMessageRef = useRef<HTMLDivElement | null>(null);
+  const previousMessageCountRef = useRef(0);
+  const sendAbortControllerRef = useRef<AbortController | null>(null);
   const [showScrollDown, setShowScrollDown] = useState(false);
 
   const handleChatScroll = () => {
     const element = chatPanelRef.current;
     if (!element) return;
-    setShowScrollDown(
-      element.scrollHeight - element.scrollTop - element.clientHeight > 80,
-    );
+    const isAwayFromBottom =
+      element.scrollHeight - element.scrollTop - element.clientHeight > 80;
+    setShowScrollDown(isAwayFromBottom);
+    if (!isAwayFromBottom) setNewMessageCount(0);
   };
 
   const scrollToLatestMessage = () => {
@@ -74,15 +226,23 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       top: chatPanelRef.current.scrollHeight,
       behavior: "smooth",
     });
+    setNewMessageCount(0);
   };
 
-  const loadSessions = async (preferredSessionId?: string | null) => {
+  const loadSessions = async (
+    preferredSessionId?: string | null,
+    silent = false,
+  ) => {
     try {
-      setLoading(true);
-      setError("");
+      if (!silent) {
+        setLoading(true);
+        setError("");
+      }
 
+      // burada tarayıcı cache kapatıldı ve eski kayıtların ekranda kalmasının önüne geçildi
       const response = await fetch(
         "http://localhost:5131/Api/AsistanYanit/Get-All",
+        { cache: "no-store" },
       );
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -101,15 +261,66 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
         setSelectedSessionId(items[0].sessionID ?? null);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Veri alınamadı.");
+      if (!silent) {
+        setError(err instanceof Error ? err.message : "Veri alınamadı.");
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
+    // Initial API synchronization is intentionally triggered on mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadSessions();
   }, []);
+
+  useEffect(() => {
+    if (!selectedSessionId) return;
+
+    const refreshActiveSession = () => {
+      if (document.visibilityState === "visible") {
+        void loadSessions(selectedSessionId, true);
+      }
+    };
+
+    const intervalId = window.setInterval(refreshActiveSession, 2000);
+    document.addEventListener("visibilitychange", refreshActiveSession);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", refreshActiveSession);
+    };
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    if (!openSessionMenuId) return;
+
+    const closeMenu = (event: PointerEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        (target.closest(".session-card-menu") ||
+          target.closest(".session-menu-button"))
+      ) {
+        return;
+      }
+      setOpenSessionMenuId(null);
+    };
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenSessionMenuId(null);
+    };
+
+    document.addEventListener("pointerdown", closeMenu);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeMenu);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openSessionMenuId]);
 
   const groupedSessions = useMemo<SessionGroup[]>(() => {
     const map = data.reduce(
@@ -119,7 +330,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
         if (!acc[key]) {
           acc[key] = {
             sessionId: key,
-            title: item.asistanYanit,
+            title: "",
             messages: [item],
           };
         } else {
@@ -131,12 +342,34 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       {} as Record<string, SessionGroup>,
     );
 
-    return Object.values(map).sort((a, b) => {
+    const sessions = Object.values(map).map((session) => {
+      const messages = session.messages.slice().sort((a, b) => {
+        const aTime = new Date(a.createdAt ?? a.tarihSaat ?? "").getTime();
+        const bTime = new Date(b.createdAt ?? b.tarihSaat ?? "").getTime();
+
+        return aTime - bTime;
+      });
+      const firstCommand = messages.find(
+        (message) =>
+          message.yanitTuru?.toUpperCase() === "KOMUT" &&
+          message.asistanYanit?.trim(),
+      );
+
+      return {
+        ...session,
+        messages,
+        title:
+          firstCommand?.asistanYanit.trim().replace(/\s+/g, " ") ||
+          `Sohbet #${session.sessionId}`,
+      };
+    });
+
+    return sessions.sort((a, b) => {
       const aLast = a.messages[a.messages.length - 1];
       const bLast = b.messages[b.messages.length - 1];
 
-      const aTime = aLast?.createdAt ?? "";
-      const bTime = bLast?.createdAt ?? "";
+      const aTime = aLast?.createdAt ?? aLast?.tarihSaat ?? "";
+      const bTime = bLast?.createdAt ?? bLast?.tarihSaat ?? "";
 
       return bTime.localeCompare(aTime);
     });
@@ -144,9 +377,17 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
   const selectedSession =
     groupedSessions.find((s) => s.sessionId === selectedSessionId) ?? null;
-  const visibleSessions = showAllSessions
-    ? groupedSessions
-    : groupedSessions.slice(0, 5);
+  const normalizedSessionSearch = sessionSearch.trim().toLocaleLowerCase("tr-TR");
+  const filteredSessions = groupedSessions.filter((session) => {
+    if (archivedSessionIds.includes(session.sessionId)) return false;
+    if (!normalizedSessionSearch) return true;
+
+    const lastMessage = session.messages[session.messages.length - 1];
+    return `${session.title} ${lastMessage?.asistanYanit ?? ""}`
+      .toLocaleLowerCase("tr-TR")
+      .includes(normalizedSessionSearch);
+  });
+  const visibleSessions = filteredSessions.slice(0, visibleSessionCount);
   const shouldLimitMessageList = (selectedSession?.messages.length ?? 0) > 8;
   const messageListStyle = shouldLimitMessageList
     ? {
@@ -154,6 +395,21 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
         overflowY: "auto" as const,
       }
     : undefined;
+  const selectedMessageCount = selectedSession?.messages.length ?? 0;
+
+  useEffect(() => {
+    const previousCount = previousMessageCountRef.current;
+    const addedMessageCount = Math.max(0, selectedMessageCount - previousCount);
+    previousMessageCountRef.current = selectedMessageCount;
+
+    if (selectedMessageCount === 0 || addedMessageCount === 0) return;
+
+    if (showScrollDown) {
+      setNewMessageCount((count) => count + addedMessageCount);
+    } else {
+      window.requestAnimationFrame(scrollToLatestMessage);
+    }
+  }, [selectedMessageCount, showScrollDown]);
 
   useEffect(() => {
     targetMessageRef.current?.scrollIntoView({
@@ -180,13 +436,121 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     }).format(date);
   };
 
+  const getSessionDateGroup = (session: SessionGroup) => {
+    const lastMessage = session.messages[session.messages.length - 1];
+    const value = lastMessage?.createdAt ?? lastMessage?.tarihSaat;
+    const date = value ? new Date(value) : null;
+    if (!date || Number.isNaN(date.getTime())) return "Daha eski";
+
+    const today = new Date();
+    const startOfToday = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate(),
+    );
+    const startOfDate = new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+    );
+    const dayDifference = Math.round(
+      (startOfToday.getTime() - startOfDate.getTime()) / 86_400_000,
+    );
+
+    if (dayDifference === 0) return "Bugün";
+    if (dayDifference === 1) return "Dün";
+    if (dayDifference < 7) return "Geçen hafta";
+    return "Daha eski";
+  };
+
+  const groupedVisibleSessions = visibleSessions.reduce<
+    { label: string; sessions: SessionGroup[] }[]
+  >((groups, session) => {
+    const label = getSessionDateGroup(session);
+    const existingGroup = groups.find((group) => group.label === label);
+    if (existingGroup) {
+      existingGroup.sessions.push(session);
+    } else {
+      groups.push({ label, sessions: [session] });
+    }
+    return groups;
+  }, []);
+
+  const getMessageType = (item: AsistanYanit) => {
+    const parsed = parseJsonValue(item.jsonData ?? item.JsonData);
+    const jsonType =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? String((parsed as Record<string, unknown>).type ?? "")
+        : "";
+    const rawType = jsonType || item.yanitTuru || "YANIT";
+    return rawType.toLocaleLowerCase("tr-TR");
+  };
+
+  const getMessageTypeLabel = (item: AsistanYanit) => {
+    const type = getMessageType(item);
+    if (type === "komut" || type === "command") return "Komut";
+    if (type === "error" || type === "hata") return "Hata";
+    if (type === "pending") return "Bekliyor";
+    if (type === "chat") return "Sohbet";
+    if (type === "system") return "Sistem";
+    return "Yanıt";
+  };
+
   const handleSelectSession = (sessionId: string) => {
     setSelectedSessionId(sessionId);
-    setIsSidebarOpen(false);
     setMessage("");
     setSendError("");
-    setShowAllSessions(false);
     setExpandedMessage(null);
+    setNewMessageCount(0);
+    previousMessageCountRef.current = 0;
+  };
+
+  const handleArchiveSession = (sessionId: string) => {
+    setArchivedSessionIds((ids) => [...ids, sessionId]);
+    setOpenSessionMenuId(null);
+    if (selectedSessionId === sessionId) {
+      setSelectedSessionId(null);
+    }
+  };
+
+  const handleDeleteSession = async (sessionId: string) => {
+    const confirmed = window.confirm(
+      "Bu sohbet silinecek ve silinen sohbetler tablosuna taşınacak. Devam etmek istiyor musunuz?",
+    );
+    if (!confirmed) return;
+
+    const numericSessionId = Number(sessionId);
+    if (!Number.isInteger(numericSessionId) || numericSessionId <= 0) {
+      setError("Geçerli bir session ID bulunamadı.");
+      return;
+    }
+
+    try {
+      setDeletingSessionId(sessionId);
+      setError("");
+      await deleteAsistanSession(numericSessionId);
+      setData((items) =>
+        items.filter((item) => String(item.sessionID) !== sessionId),
+      );
+      setOpenSessionMenuId(null);
+      if (selectedSessionId === sessionId) setSelectedSessionId(null);
+    } catch {
+      setError(
+        "Sohbet silinemedi. Backend delete-session endpoint'ini kontrol edin.",
+      );
+    } finally {
+      setDeletingSessionId(null);
+    }
+  };
+
+  const handleCopyMessage = async (item: AsistanYanit) => {
+    const body = getMessageBody(item);
+    const jsonSource = getModalJsonSource(item);
+    await navigator.clipboard.writeText(
+      [body.text, jsonSource].filter(Boolean).join("\n\n"),
+    );
+    setCopiedMessageId(item.id);
+    window.setTimeout(() => setCopiedMessageId(null), 1500);
   };
 
   const formatAssistantResponse = (value: unknown) => {
@@ -209,25 +573,61 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     return JSON.stringify(value, null, 2);
   };
 
+  const parseJsonValue = (value: unknown) => {
+    let parsed = value;
+
+    for (let index = 0; index < 3 && typeof parsed === "string"; index += 1) {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        return null;
+      }
+    }
+
+    return parsed;
+  };
+
+  const getVisibleJsonData = (item: AsistanYanit) => {
+    const rawJson = item.jsonData ?? item.JsonData ?? null;
+
+    if (
+      rawJson === null ||
+      rawJson === undefined ||
+      item.yanitTuru?.toUpperCase() !== AsistanYanitTuru.YANIT
+    ) {
+      return rawJson;
+    }
+
+    const parsed = parseJsonValue(rawJson);
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return rawJson;
+    }
+
+    const type = (parsed as Record<string, unknown>).type;
+
+    if (
+      typeof type === "string" &&
+      type.trim() !== "" &&
+      type.trim().toLowerCase() !== "command"
+    ) {
+      return null;
+    }
+
+    return rawJson;
+  };
+
   const getMessageBody = (item: AsistanYanit) => {
     const text = formatAssistantResponse(item.asistanYanit);
-    const rawJson = item.jsonData ?? item.JsonData ?? null;
+    const rawJson = getVisibleJsonData(item);
     const jsonText =
       rawJson === null || rawJson === undefined
         ? ""
         : formatAssistantResponse(rawJson);
 
-    const fullText = [text, jsonText].filter(Boolean).join("\n\n");
+    const fullText = text;
 
     return { text, jsonText, fullText, rawJson };
-  };
-
-  const parseJsonValue = (value: string) => {
-    try {
-      return JSON.parse(value);
-    } catch {
-      return null;
-    }
   };
 
   const formatModalJson = (value: string) => {
@@ -246,6 +646,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
             ? (item as Record<string, unknown>)
             : { value: item },
         ),
+        totalCount: parsed.length,
         restJson: "",
       };
     }
@@ -253,20 +654,20 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     const obj = parsed as Record<string, unknown>;
     const idValue = obj.id;
     const projectValue = obj.project;
-    const rest = { ...obj };
-
-    delete rest.id;
-    delete rest.project;
-    delete rest.issues;
-    delete rest.issueSummary;
 
     const projectName =
       projectValue && typeof projectValue === "object"
         ? String((projectValue as Record<string, unknown>).name ?? "")
         : "";
 
-    const issues = Array.isArray((obj as Record<string, unknown>).issues)
-      ? ((obj as Record<string, unknown>).issues as Record<string, unknown>[])
+    const rawIssues = obj.issues ?? obj.Issues;
+    const parsedIssues =
+      typeof rawIssues === "string" ? parseJsonValue(rawIssues) : rawIssues;
+    const issues = Array.isArray(parsedIssues)
+      ? parsedIssues.filter(
+          (item): item is Record<string, unknown> =>
+            Boolean(item) && typeof item === "object",
+        )
       : [];
     const issueSummary = Array.isArray(
       (obj as Record<string, unknown>).issueSummary,
@@ -284,22 +685,21 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       id: idValue,
       projectName,
       items: hasCollection ? items : [obj],
-      restJson: hasCollection && Object.keys(rest).length > 0
-        ? JSON.stringify(rest, null, 2)
-        : "",
+      totalCount:
+        typeof obj.total_count === "number"
+          ? obj.total_count
+          : hasCollection
+            ? items.length
+            : 1,
+      restJson: "",
     };
   };
 
   const getModalJsonSource = (item: AsistanYanit) => {
-    const rawJson = item.jsonData ?? item.JsonData ?? null;
+    const rawJson = getVisibleJsonData(item);
 
     if (rawJson !== null && rawJson !== undefined) {
       return formatAssistantResponse(rawJson);
-    }
-
-    const parsedText = parseJsonValue(item.asistanYanit);
-    if (parsedText) {
-      return JSON.stringify(parsedText, null, 2);
     }
 
     return "";
@@ -308,8 +708,9 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   const handleCopyModalContent = async () => {
     if (!expandedMessage) return;
 
-    const content =
-      getModalJsonSource(expandedMessage) || getMessageBody(expandedMessage).fullText;
+    const body = getMessageBody(expandedMessage);
+    const jsonSource = getModalJsonSource(expandedMessage);
+    const content = [body.text, jsonSource].filter(Boolean).join("\n\n");
 
     await navigator.clipboard.writeText(content);
     setIsCopied(true);
@@ -410,7 +811,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
   const getSidebarTitle = (value: string) => {
     const trimmed = value.trim();
-    const maxLength = 90;
+    const maxLength = 64;
 
     if (trimmed.length <= maxLength) {
       return trimmed;
@@ -459,12 +860,15 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     setMessage("");
     setSendError("");
     setIsSending(true);
+    const requestController = new AbortController();
+    sendAbortControllerRef.current = requestController;
 
     try {
       const result = await sendAsistanChatMessage(
         trimmedMessage,
         AsistanYanitTuru.KOMUT,
         numericSessionId,
+        requestController.signal,
       );
 
       if (!result.ok) {
@@ -473,6 +877,11 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
       await loadSessions(String(result.sessionId));
     } catch (error) {
+      if (requestController.signal.aborted) {
+        setSendError("İstek iptal edildi.");
+        return;
+      }
+
       const errorMessage =
         error instanceof Error
           ? error.message
@@ -480,7 +889,21 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
       setSendError(errorMessage);
     } finally {
-      setIsSending(false);
+      if (sendAbortControllerRef.current === requestController) {
+        sendAbortControllerRef.current = null;
+        setIsSending(false);
+      }
+    }
+  };
+
+  const handleCancelMessage = async () => {
+    sendAbortControllerRef.current?.abort();
+    setIsSending(false);
+
+    try {
+      await cancelSession();
+    } catch {
+      setSendError("İstek durduruldu ancak backend oturumu kapatılamadı.");
     }
   };
 
@@ -499,61 +922,128 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
         </div>
 
         <div className="sidebar-summary">
-          <span>{groupedSessions.length} sohbet</span>
+          <span>{filteredSessions.length} sohbet</span>
           <span>{data.length} kayıt</span>
         </div>
 
-        <div className="session-list">
+        <label className="session-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="m16 16 5 5" />
+          </svg>
+          <input
+            type="search"
+            value={sessionSearch}
+            onChange={(event) => setSessionSearch(event.target.value)}
+            placeholder="Sohbetlerde ara..."
+          />
+        </label>
+
+        <div
+          className={`session-list ${visibleSessionCount > 5 ? "expanded" : ""}`}
+        >
           {loading && <div className="state-box">Yükleniyor...</div>}
           {error && <div className="state-box error">{error}</div>}
+          {!loading && !error && groupedVisibleSessions.length === 0 && (
+            <div className="state-box">
+              {sessionSearch
+                ? "Aramanızla eşleşen sohbet bulunamadı."
+                : "Gösterilecek sohbet bulunamadı."}
+            </div>
+          )}
 
           {!loading &&
             !error &&
-            visibleSessions.map((session) => {
+            groupedVisibleSessions.map((group) => (
+              <section className="session-date-group" key={group.label}>
+                <div className="session-date-label">{group.label}</div>
+                {group.sessions.map((session) => {
               const isActive = session.sessionId === selectedSessionId;
               const lastMessage = session.messages[session.messages.length - 1];
+              const lastPreview = getPreviewText(lastMessage?.asistanYanit ?? "");
 
               return (
-                <button
+                <div
                   key={session.sessionId}
                   className={`session-card ${isActive ? "active" : ""}`}
                   onClick={() => handleSelectSession(session.sessionId)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      handleSelectSession(session.sessionId);
+                    }
+                  }}
+                  role="button"
+                  tabIndex={0}
                 >
                   <div className="session-card-header">
                     <span className="session-id">
                       {getSidebarTitle(session.title)}
                     </span>
-                    <span className="message-count">
-                      {session.messages.length} mesaj
-                    </span>
+                    <button
+                      type="button"
+                      className="session-menu-button"
+                      aria-label="Sohbet seçenekleri"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setSessionMenuPosition({
+                          top: rect.top,
+                          left: rect.right + 8,
+                        });
+                        setOpenSessionMenuId((current) =>
+                          current === session.sessionId ? null : session.sessionId,
+                        );
+                      }}
+                    >
+                      •••
+                    </button>
                   </div>
 
                   <div className="session-preview">
-                    Session ID: {session.sessionId}
+                    {lastPreview.text || "Henüz mesaj yok"}
                   </div>
 
                   <div className="session-footer">
-                    <span>{lastMessage?.yanitTuru || "-"}</span>
+                    <span>{session.messages.length} mesaj</span>
                     <span>
                       {formatTime(
                         lastMessage?.createdAt ?? lastMessage?.tarihSaat,
                       )}
                     </span>
                   </div>
-                </button>
-              );
-            })}
 
-          {!loading && !error && groupedSessions.length > 5 && (
-            <button
-              type="button"
-              className="session-show-more"
-              onClick={() => setShowAllSessions((prev) => !prev)}
-            >
-              {showAllSessions ? "Daha az göster" : "Devamını gör"}
-            </button>
-          )}
+                </div>
+              );
+                })}
+              </section>
+            ))}
+
         </div>
+
+        {!loading && !error && filteredSessions.length > 5 && (
+          <button
+            type="button"
+            className="session-show-more"
+            onClick={() =>
+              setVisibleSessionCount((count) =>
+                count >= filteredSessions.length ? 5 : count + 5,
+              )
+            }
+          >
+            {visibleSessionCount >= filteredSessions.length
+              ? "Daha az göster"
+              : "Devamını gör"}
+          </button>
+        )}
+        {archivedSessionIds.length > 0 && (
+          <button
+            type="button"
+            className="session-archive-undo"
+            onClick={() => setArchivedSessionIds([])}
+          >
+            {archivedSessionIds.length} arşivleneni geri getir
+          </button>
+        )}
       </aside>
 
       <main className="sessions-main">
@@ -562,9 +1052,14 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
             <p className="screen-label">Konuşma Detayı</p>
             <h2>
               {selectedSession
-                ? selectedSession.sessionId
+                ? getSidebarTitle(selectedSession.title)
                 : "Seçili sohbet yok"}
             </h2>
+            {selectedSession && (
+              <span className="main-session-meta">
+                Sohbet #{selectedSession.sessionId} · {selectedSession.messages.length} mesaj
+              </span>
+            )}
           </div>
         </div>
 
@@ -591,9 +1086,19 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
               return aTime - bTime;
             })
             .map((item, index) => {
-              const isUser = item.yanitTuru === "KOMUT";
+              const isUser =
+                item.yanitTuru?.toUpperCase() === AsistanYanitTuru.KOMUT;
               const body = getMessageBody(item);
-              const preview = getPreviewText(body.fullText);
+              const hasJsonContent = Boolean(getModalJsonSource(item));
+              const assistantTextIsJson = Boolean(
+                parseJsonValue(item.asistanYanit),
+              );
+              const visibleText = assistantTextIsJson
+                ? "Yapılandırılmış sonuç hazır."
+                : body.text || (hasJsonContent ? "Yapılandırılmış sonuç hazır." : "");
+              const preview = getPreviewText(visibleText);
+              const messageType = getMessageType(item);
+              const messageTypeLabel = getMessageTypeLabel(item);
 
               return (
                 <div
@@ -603,24 +1108,90 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                       ? targetMessageRef
                       : null
                   }
-                  className={`message-row ${isUser ? "user" : "assistant"}`}
+                  className={`message-row ${isUser ? "user" : "assistant"} message-${messageType}`}
                 >
-                  <div className="message-bubble">
-                    <div className="message-text">{preview.text}</div>
-                    {preview.isTruncated && (
+                  <div className="message-avatar" aria-hidden="true">
+                    {isUser ? (
+                      <svg viewBox="0 0 24 24">
+                        <circle cx="12" cy="8" r="4" />
+                        <path d="M5 20c.7-4 3.1-6 7-6s6.3 2 7 6" />
+                      </svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24">
+                        <path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5L12 3Z" />
+                        <path d="m18.5 15 .7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3Z" />
+                      </svg>
+                    )}
+                  </div>
+                  <div className="message-content">
+                    <div className="message-heading">
+                      <strong>{isUser ? "Siz" : "Asistan"}</strong>
+                      <span className={`message-type-badge badge-${messageType}`}>
+                        {messageTypeLabel}
+                      </span>
+                    </div>
+                    <div className="message-bubble">
+                      <div className="message-text">{preview.text}</div>
+                      {(preview.isTruncated || hasJsonContent) && (
+                        <button
+                          type="button"
+                          className="message-more-btn"
+                          onClick={() => setExpandedMessage(item)}
+                        >
+                          {hasJsonContent ? "Detayı gör" : "Devamını gör"}
+                        </button>
+                      )}
+                      <div className="message-meta">
+                        <span>
+                          {formatTime(item.createdAt ?? item.tarihSaat)}
+                        </span>
+                        {item.komutId && <span>Komut #{item.komutId}</span>}
+                      </div>
+                    </div>
+                    <div className="message-actions">
                       <button
                         type="button"
-                        className="message-more-btn"
-                        onClick={() => setExpandedMessage(item)}
+                        onClick={() => void handleCopyMessage(item)}
+                        title="Mesajı kopyala"
                       >
-                        Devamını gör
+                        {copiedMessageId === item.id ? "Kopyalandı" : "Kopyala"}
                       </button>
-                    )}
-                    <div className="message-meta">
-                      <span>{isUser ? "Kullanici" : "Sistem"}</span>
-                      <span>
-                        {item.komutId ? `Komut: ${item.komutId}` : ""}
-                      </span>
+                      {!isUser && (
+                        <>
+                          <button
+                            type="button"
+                            className={
+                              messageFeedback[item.id] === "positive" ? "active" : ""
+                            }
+                            onClick={() =>
+                              setMessageFeedback((feedback) => ({
+                                ...feedback,
+                                [item.id]: "positive",
+                              }))
+                            }
+                            aria-label="Faydalı yanıt"
+                            title="Faydalı"
+                          >
+                            👍
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              messageFeedback[item.id] === "negative" ? "active" : ""
+                            }
+                            onClick={() =>
+                              setMessageFeedback((feedback) => ({
+                                ...feedback,
+                                [item.id]: "negative",
+                              }))
+                            }
+                            aria-label="Faydasız yanıt"
+                            title="Faydasız"
+                          >
+                            👎
+                          </button>
+                        </>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -650,7 +1221,11 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
             aria-label="Son mesaja git"
             title="Son mesaja git"
           >
-            ↓
+            {newMessageCount > 0 ? (
+              <span>{newMessageCount} yeni mesaj</span>
+            ) : (
+              "↓"
+            )}
           </button>
         )}
 
@@ -673,12 +1248,52 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
               >
                 Gönder
               </button>
+
+              <button
+                type="button"
+                className="session-stop-button"
+                onClick={() => void handleCancelMessage()}
+                disabled={!isSending}
+                aria-label="İsteği iptal et"
+                title={isSending ? "İsteği iptal et" : "Aktif istek yok"}
+              >
+                <span className="stop-icon"></span>
+              </button>
             </div>
 
             {sendError && <div className="session-send-error">{sendError}</div>}
           </>
         )}
       </main>
+
+      {openSessionMenuId &&
+        createPortal(
+          <div
+            className="session-card-menu session-card-menu-portal"
+            style={{
+              top: sessionMenuPosition.top,
+              left: sessionMenuPosition.left,
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => handleArchiveSession(openSessionMenuId)}
+            >
+              Sohbeti arşivle
+            </button>
+            <button
+              type="button"
+              className="session-delete-button"
+              disabled={deletingSessionId === openSessionMenuId}
+              onClick={() => void handleDeleteSession(openSessionMenuId)}
+            >
+              {deletingSessionId === openSessionMenuId
+                ? "Siliniyor..."
+                : "Sohbeti sil"}
+            </button>
+          </div>,
+          document.body,
+        )}
 
       {expandedMessage && (
         <div
@@ -698,7 +1313,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                 <p className="screen-label" id="message-modal-title">
                   Mesaj Detayı
                 </p>
-                <h3>{expandedMessage.yanitTuru || "Mesaj"}</h3>
+                <h3>{getMessageTypeLabel(expandedMessage)}</h3>
               </div>
 
               <div className="message-modal-actions">
@@ -753,18 +1368,48 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                 const modalJson = jsonSource
                   ? formatModalJson(jsonSource)
                   : null;
+                const parsedDetail = jsonSource
+                  ? parseJsonValue(jsonSource)
+                  : null;
+                const detailObject =
+                  parsedDetail &&
+                  typeof parsedDetail === "object" &&
+                  !Array.isArray(parsedDetail)
+                    ? (parsedDetail as Record<string, unknown>)
+                    : null;
+                const detailType = String(detailObject?.type ?? "").toLowerCase();
+                const hasTaskCollection = Boolean(
+                  detailObject?.issues ||
+                    detailObject?.Issues ||
+                    detailObject?.issueSummary,
+                );
+                const detailTitle = hasTaskCollection
+                  ? "Görevler"
+                  : detailType === "error"
+                    ? "Hata ayrıntıları"
+                    : detailType === "command"
+                      ? "Komut ayrıntıları"
+                      : "Yanıt ayrıntıları";
                 const filteredItems = modalJson
                   ? filterModalItems(modalJson.items)
                   : [];
 
                 return (
-                  <div className="modal-json-layout">
-                    <div className="modal-json-filters">
+                  <div className={`modal-json-layout detail-${detailType || "response"}`}>
+                    {body.text && modalJson && (
+                      <div className="modal-response-summary">
+                        <span>Asistan yanıtı</span>
+                        <p>{body.text}</p>
+                      </div>
+                    )}
+
+                    {modalJson && (
+                      <div className="modal-json-filters">
                       <input
                         type="text"
                         value={modalSearch}
                         onChange={(event) => setModalSearch(event.target.value)}
-                        placeholder="JSON içinde ara..."
+                        placeholder="İçerikte ara..."
                       />
 
                       <input
@@ -782,10 +1427,17 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                         onChange={(event) => setModalDateTo(event.target.value)}
                         placeholder="Bitiş tarihi"
                       />
-                    </div>
+                      </div>
+                    )}
 
                     {modalJson && filteredItems.length > 0 && (
                       <div className="modal-json-list">
+                        <div className="modal-task-list-heading">
+                          <strong>{detailTitle}</strong>
+                          <span>
+                            {filteredItems.length} kayıt
+                          </span>
+                        </div>
                         {filteredItems.map((item, index) => (
                           <div
                             key={`${index}-${String(item.id ?? index)}`}
@@ -796,9 +1448,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                                 `Kayıt ${index + 1}`}
                             </div>
 
-                            <pre className="modal-json-rest">
-                              {JSON.stringify(item, null, 2)}
-                            </pre>
+                            {renderReadableValue(item)}
                           </div>
                         ))}
                       </div>
@@ -811,16 +1461,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                       <div className="state-box">Eşleşen kayıt bulunamadı.</div>
                     )}
 
-                    {modalJson?.restJson &&
-                    !modalSearch &&
-                    !modalDateFrom &&
-                    !modalDateTo ? (
-                      <pre className="modal-json-rest">
-                        {modalJson.restJson}
-                      </pre>
-                    ) : !modalJson ? (
-                      <pre>{body.fullText}</pre>
-                    ) : null}
+                    {!modalJson && <pre>{body.text}</pre>}
                   </div>
                 );
               })()}
