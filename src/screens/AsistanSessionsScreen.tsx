@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 
 import {
   AsistanYanitTuru,
+  sendAsistanConfirmationAnswer,
   sendAsistanChatMessage,
 } from "../api/asistanChatService";
 import { cancelSession } from "../api/asistanCancelService";
@@ -201,6 +202,12 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   const [messageFeedback, setMessageFeedback] = useState<
     Record<number, "positive" | "negative">
   >({});
+  const [confirmationAnswer, setConfirmationAnswer] = useState<
+    Record<number, "evet" | "hayır">
+  >({});
+  const [answeringConfirmationId, setAnsweringConfirmationId] = useState<
+    number | null
+  >(null);
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
@@ -396,6 +403,16 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       }
     : undefined;
   const selectedMessageCount = selectedSession?.messages.length ?? 0;
+  const sortedSelectedMessages = useMemo(
+    () =>
+      selectedSession?.messages.slice().sort((a, b) => {
+        const aTime = new Date(a.createdAt ?? a.tarihSaat ?? "").getTime();
+        const bTime = new Date(b.createdAt ?? b.tarihSaat ?? "").getTime();
+
+        return aTime - bTime;
+      }) ?? [],
+    [selectedSession],
+  );
 
   useEffect(() => {
     const previousCount = previousMessageCountRef.current;
@@ -491,6 +508,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     if (type === "komut" || type === "command") return "Komut";
     if (type === "error" || type === "hata") return "Hata";
     if (type === "pending") return "Bekliyor";
+    if (type === "onayyanit") return "Onay";
     if (type === "chat") return "Sohbet";
     if (type === "system") return "Sistem";
     return "Yanıt";
@@ -896,6 +914,44 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     }
   };
 
+  const handleConfirmationAnswer = async (
+    confirmation: AsistanYanit,
+    answer: "evet" | "hayır",
+  ) => {
+    if (!selectedSessionId || answeringConfirmationId !== null) return;
+
+    const numericSessionId = Number(selectedSessionId);
+    if (!Number.isInteger(numericSessionId) || numericSessionId <= 0) {
+      setSendError("Geçerli bir session ID bulunamadı.");
+      return;
+    }
+
+    setAnsweringConfirmationId(confirmation.id);
+    setSendError("");
+
+    try {
+      await sendAsistanConfirmationAnswer(
+        answer,
+        numericSessionId,
+        confirmation.jsonData ?? confirmation.JsonData,
+      );
+
+      setConfirmationAnswer((answers) => ({
+        ...answers,
+        [confirmation.id]: answer,
+      }));
+      await loadSessions(selectedSessionId, true);
+    } catch (error) {
+      setSendError(
+        error instanceof Error
+          ? error.message
+          : "Onay yanıtı gönderilirken hata oluştu.",
+      );
+    } finally {
+      setAnsweringConfirmationId(null);
+    }
+  };
+
   const handleCancelMessage = async () => {
     sendAbortControllerRef.current?.abort();
     setIsSending(false);
@@ -1073,21 +1129,35 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
             <div className="empty-state">Soldan bir sohbet seç.</div>
           )}
 
-          {selectedSession?.messages
-            .slice()
-            .sort((a, b) => {
-              const aTime = new Date(
-                a.createdAt ?? a.tarihSaat ?? "",
-              ).getTime();
-              const bTime = new Date(
-                b.createdAt ?? b.tarihSaat ?? "",
-              ).getTime();
+          {sortedSelectedMessages.map((item, index) => {
+              const isConfirmation =
+                item.yanitTuru?.toUpperCase() === AsistanYanitTuru.ONAY;
+              if (isConfirmation) return null;
 
-              return aTime - bTime;
-            })
-            .map((item, index) => {
+              const normalizedResponseType = item.yanitTuru?.toUpperCase();
               const isUser =
-                item.yanitTuru?.toUpperCase() === AsistanYanitTuru.KOMUT;
+                normalizedResponseType === AsistanYanitTuru.KOMUT ||
+                normalizedResponseType === AsistanYanitTuru.ONAYYANIT;
+              const confirmation =
+                !isUser &&
+                sortedSelectedMessages[index + 1]?.yanitTuru?.toUpperCase() ===
+                  AsistanYanitTuru.ONAY
+                  ? sortedSelectedMessages[index + 1]
+                  : null;
+              const persistedConfirmationAnswer =
+                confirmation &&
+                sortedSelectedMessages[index + 2]?.yanitTuru?.toUpperCase() ===
+                  AsistanYanitTuru.ONAYYANIT
+                  ? sortedSelectedMessages[index + 2].asistanYanit
+                      .trim()
+                      .toLocaleLowerCase("tr-TR")
+                  : "";
+              const selectedConfirmationAnswer =
+                (confirmation && confirmationAnswer[confirmation.id]) ||
+                (persistedConfirmationAnswer === "evet" ||
+                persistedConfirmationAnswer === "hayır"
+                  ? persistedConfirmationAnswer
+                  : undefined);
               const body = getMessageBody(item);
               const hasJsonContent = Boolean(getModalJsonSource(item));
               const assistantTextIsJson = Boolean(
@@ -1104,7 +1174,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                 <div
                   key={item.id}
                   ref={
-                    index === selectedSession.messages.length - 2
+                    index === sortedSelectedMessages.length - 2
                       ? targetMessageRef
                       : null
                   }
@@ -1147,6 +1217,53 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                         </span>
                         {item.komutId && <span>Komut #{item.komutId}</span>}
                       </div>
+                      {confirmation && (
+                        <div className="confirmation-section">
+                          <div className="confirmation-question">
+                            {confirmation.asistanYanit}
+                          </div>
+                          <div
+                            className="confirmation-actions"
+                            role="group"
+                            aria-label="Onay yanıtı"
+                          >
+                            <button
+                              type="button"
+                              className={
+                                selectedConfirmationAnswer === "evet"
+                                  ? "selected"
+                                  : ""
+                              }
+                              disabled={
+                                answeringConfirmationId !== null ||
+                                Boolean(selectedConfirmationAnswer)
+                              }
+                              onClick={() =>
+                                void handleConfirmationAnswer(confirmation, "evet")
+                              }
+                            >
+                              Evet
+                            </button>
+                            <button
+                              type="button"
+                              className={
+                                selectedConfirmationAnswer === "hayır"
+                                  ? "selected"
+                                  : ""
+                              }
+                              disabled={
+                                answeringConfirmationId !== null ||
+                                Boolean(selectedConfirmationAnswer)
+                              }
+                              onClick={() =>
+                                void handleConfirmationAnswer(confirmation, "hayır")
+                              }
+                            >
+                              Hayır
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <div className="message-actions">
                       <button

@@ -11,9 +11,43 @@ import { AsistanYanitTuru } from "./api/asistanChatService";
 import { handleApiError } from "./api/apiErrorHandler";
 import SettingsScreen, { type AppSettings } from "./screens/SettingsScreen";
 import {
+  checkPythonInputStatus,
   GetAllAssistanSetting,
   type AsistanSettingsResponse,
 } from "./api/systemSettingsService";
+
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  0: { transcript: string };
+};
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+};
+
+type SpeechRecognitionErrorEventLike = {
+  error: string;
+};
+
+type SpeechRecognitionLike = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+  onend: (() => void) | null;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+type SpeechRecognitionWindow = Window & {
+  SpeechRecognition?: SpeechRecognitionConstructor;
+  webkitSpeechRecognition?: SpeechRecognitionConstructor;
+};
 
 const DEFAULT_SETTINGS: AppSettings = {
   redmineToken: "",
@@ -93,12 +127,16 @@ function App() {
   const [isListening, setIsListening] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const requestAbortControllerRef = useRef<AbortController | null>(null);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const [pendingResult, setPendingResult] = useState<PendingResult | null>(
     null,
   );
   const [screen, setScreen] = useState<"home" | "sessions" | "settings">("home");
   const [previousScreen, setPreviousScreen] = useState<"home" | "sessions">("home");
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
+  const [pythonInputStatus, setPythonInputStatus] = useState<
+    "checking" | "running" | "stopped"
+  >("checking");
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
   const [waitingExplanation, setWaitingExplanation] = useState(false);
   type WaitingFor = "TASK_ID" | "ACIKLAMA" | "SEARCH" | null;
@@ -121,6 +159,43 @@ function App() {
   useEffect(() => {
     localStorage.setItem("asistan-settings", JSON.stringify(settings));
   }, [settings]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const refreshPythonInputStatus = async () => {
+      try {
+        const status = await checkPythonInputStatus();
+        if (isMounted) {
+          setPythonInputStatus(status.running ? "running" : "stopped");
+        }
+      } catch {
+        if (isMounted) setPythonInputStatus("stopped");
+      }
+    };
+
+    void refreshPythonInputStatus();
+    const intervalId = window.setInterval(refreshPythonInputStatus, 5000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!settings.voiceInputEnabled) {
+      speechRecognitionRef.current?.abort();
+      speechRecognitionRef.current = null;
+    }
+  }, [settings.voiceInputEnabled]);
+
+  useEffect(
+    () => () => {
+      speechRecognitionRef.current?.abort();
+    },
+    [],
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -263,8 +338,76 @@ function App() {
   const handleMicClick = () => {
     if (!settings.voiceInputEnabled) return;
 
+    if (isListening) {
+      speechRecognitionRef.current?.stop();
+      return;
+    }
+
+    const recognitionWindow = window as SpeechRecognitionWindow;
+    const Recognition =
+      recognitionWindow.SpeechRecognition ??
+      recognitionWindow.webkitSpeechRecognition;
+
+    if (!Recognition) {
+      setUiError({
+        title: "Sesli giriş desteklenmiyor",
+        message:
+          "Bu tarayıcı konuşmayı metne dönüştürme özelliğini desteklemiyor. Chrome veya Edge ile tekrar deneyin.",
+      });
+      return;
+    }
+
+    const recognition = new Recognition();
+    recognition.lang = "tr-TR";
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.onresult = (event) => {
+      let transcript = "";
+      let hasFinalResult = false;
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        transcript += event.results[index][0]?.transcript ?? "";
+        hasFinalResult ||= event.results[index].isFinal;
+      }
+
+      const normalizedTranscript = transcript.trim();
+      if (normalizedTranscript) setMessage(normalizedTranscript);
+      if (hasFinalResult && normalizedTranscript) setKeyboardMode(true);
+    };
+    recognition.onerror = (event) => {
+      setIsListening(false);
+      speechRecognitionRef.current = null;
+
+      if (event.error === "aborted") return;
+
+      setUiError({
+        title: "Mikrofon kullanılamadı",
+        message:
+          event.error === "not-allowed"
+            ? "Mikrofon izni verilmedi. Tarayıcı site izinlerinden mikrofon erişimini açın."
+            : "Ses algılanamadı. Mikrofon bağlantısını kontrol edip tekrar deneyin.",
+      });
+    };
+    recognition.onend = () => {
+      setIsListening(false);
+      speechRecognitionRef.current = null;
+    };
+
     setKeyboardMode(false);
-    setIsListening((prev) => !prev);
+    setUiError(null);
+    speechRecognitionRef.current = recognition;
+
+    try {
+      recognition.start();
+      setIsListening(true);
+    } catch {
+      speechRecognitionRef.current = null;
+      setIsListening(false);
+      setUiError({
+        title: "Mikrofon başlatılamadı",
+        message: "Mikrofon zaten kullanımda olabilir. Birkaç saniye sonra tekrar deneyin.",
+      });
+    }
 
     // Sonradan burada ses dinleme veya backend'e ses gÃ¶nderme iÅŸlemi olacak.
   };
@@ -272,6 +415,8 @@ function App() {
   // buraya bir kere basÄ±ldÄ±ktan sonra createcommandhandler Ã§alÄ±ÅŸacak ve sohbet kaydÄ± girilecek.
   // sonrasÄ±nda her komut iÃ§in sendCommandHandler iÃ§erisine gÃ¶ndermeli.
   const handleKeyboardClick = () => {
+    speechRecognitionRef.current?.abort();
+    speechRecognitionRef.current = null;
     setKeyboardMode(true);
     setIsListening(false);
   };
@@ -637,6 +782,20 @@ function App() {
 
   return (
     <main className="assistant-page">
+      <div
+        className={`python-service-status ${pythonInputStatus}`}
+        role="status"
+        title="127.0.0.1:8766 Python giriş servisi"
+      >
+        <i aria-hidden="true"></i>
+        <span>
+          {pythonInputStatus === "checking"
+            ? "Python kontrol ediliyor"
+            : pythonInputStatus === "running"
+              ? "Python çalışıyor"
+              : "Python çalışmıyor"}
+        </span>
+      </div>
       <button
         type="button"
         className={`global-settings-button ${screen === "settings" ? "active" : ""}`}

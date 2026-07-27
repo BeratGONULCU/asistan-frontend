@@ -8,6 +8,13 @@ export type OllamaStatus = {
   message: string;
 };
 
+export type PythonInputStatus = {
+  running: boolean;
+  host: string;
+  port: number;
+  message: string;
+};
+
 export type CreateAsistanSettingsRequest = {
   redmineToken: string;
   wakeWord: string;
@@ -104,6 +111,14 @@ export const checkOllamaStatus = async (): Promise<OllamaStatus> => {
 
     throw error;
   }
+};
+
+export const checkPythonInputStatus = async (): Promise<PythonInputStatus> => {
+  const response = await apiClient.get<PythonInputStatus>(
+    "/System/python-input-status",
+  );
+
+  return response.data;
 };
 
 type SaveFilePickerWindow = Window & {
