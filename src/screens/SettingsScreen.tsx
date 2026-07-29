@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   checkOllamaStatus,
   downloadOllamaInstaller,
@@ -10,7 +10,7 @@ import {
 } from "../api/systemSettingsService";
 import "../style/SettingsScreen.css";
 
-export type AiProvider = "gemini" | "llama" | "openai";
+export type AiProvider = "gemini" | "llama" | "openai" | "deepseek";
 
 export type AppSettings = {
   redmineToken: string;
@@ -21,6 +21,8 @@ export type AppSettings = {
   geminiModel: string;
   openAiApiKey: string;
   openAiModel: string;
+  deepseekApiKey: string;
+  deepseekModel: string;
   ollamaModel: string;
   voiceInputEnabled: boolean;
   aiFallbackProvider?: string;
@@ -33,6 +35,7 @@ type Props = {
   onChange: (settings: AppSettings) => void;
   onBack: () => void;
   onReset: () => void;
+  onSaved: () => void | Promise<void>;
 };
 
 export default function SettingsScreen({
@@ -40,13 +43,50 @@ export default function SettingsScreen({
   onChange,
   onBack,
   onReset,
+  onSaved,
 }: Props) {
+  const activeProvider = String(settings.activeProvider)
+    .trim()
+    .toLowerCase();
+  const [databaseActiveProvider, setDatabaseActiveProvider] = useState("");
   const [showSecrets, setShowSecrets] = useState(false);
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
   const [isCheckingOllama, setIsCheckingOllama] = useState(false);
   const [isDownloadingOllama, setIsDownloadingOllama] = useState(false);
   const [validationMessage, setValidationMessage] = useState("");
   const [noticeType, setNoticeType] = useState<"success" | "error">("success");
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadDatabaseActiveProvider = async () => {
+      try {
+        const response = await GetAllAssistanSetting();
+        const records = Array.isArray(response) ? response : [response];
+        const saved = records.at(-1);
+        const provider = (
+          saved?.activeProvider ??
+          saved?.ActiveProvider ??
+          saved?.active_provider ??
+          ""
+        )
+          .trim()
+          .toLowerCase();
+
+        if (isMounted) {
+          setDatabaseActiveProvider(provider);
+        }
+      } catch (error) {
+        console.error("Veritabanındaki aktif provider okunamadı.", error);
+      }
+    };
+
+    void loadDatabaseActiveProvider();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const updateSetting = <K extends keyof AppSettings>(
     key: K,
@@ -74,6 +114,16 @@ export default function SettingsScreen({
       return "OpenAI sağlayıcısı için API anahtarı zorunludur.";
     if (settings.activeProvider === "openai" && !settings.openAiModel?.trim())
       return "OpenAI modeli girilmelidir.";
+    if (
+      settings.activeProvider === "deepseek" &&
+      !settings.deepseekApiKey?.trim()
+    )
+      return "DeepSeek sağlayıcısı için API anahtarı zorunludur.";
+    if (
+      settings.activeProvider === "deepseek" &&
+      !settings.deepseekModel?.trim()
+    )
+      return "DeepSeek modeli girilmelidir.";
     return "";
   };
 
@@ -90,7 +140,7 @@ export default function SettingsScreen({
       const response = await GetAllAssistanSetting();
       return Array.isArray(response) ? response.length > 0 : Boolean(response);
     }
-    catch(error: any)
+    catch
     {
       console.error("ayar bilgileri kontrol edilemedi");
       setValidationMessage("ayar bilgileri getirilemedi");
@@ -122,6 +172,9 @@ export default function SettingsScreen({
         geminiModel: settings.geminiModel,
         openAiApiKey: settings.openAiApiKey,
         openAiModel: settings.openAiModel,
+        deepseekApiKey: settings.deepseekApiKey,
+        deepseekModel: settings.deepseekModel,
+        deepseekBaseUrl: "https://api.deepseek.com",
         ollamaModel: settings.ollamaModel,
         voiceInputEnabled: settings.voiceInputEnabled,
         aiFallbackProvider: settings.aiFallbackProvider ?? "OLLAMA",
@@ -130,6 +183,8 @@ export default function SettingsScreen({
       setNoticeType("success");
       setValidationMessage("ayarlar başarıyla güncellendi");
       console.log("ayarlar güncellendi", updatedSetting);
+      setDatabaseActiveProvider(activeProvider);
+      await onSaved();
     } catch (error) {
       setNoticeType("error");
       setValidationMessage("ayarlar güncellenemedi, lütfen bağlantınızı kontrol edin");
@@ -154,6 +209,9 @@ export default function SettingsScreen({
         geminiModel: settings.geminiModel,
         openAiApiKey: settings.openAiApiKey,
         openAiModel: settings.openAiModel,
+        deepseekApiKey: settings.deepseekApiKey,
+        deepseekModel: settings.deepseekModel,
+        deepseekBaseUrl: "https://api.deepseek.com",
         ollamaModel: settings.ollamaModel,
         voiceInputEnabled: settings.voiceInputEnabled,
         aiFallbackProvider: settings.aiFallbackProvider ?? "OLLAMA",
@@ -162,7 +220,9 @@ export default function SettingsScreen({
       setNoticeType("success");
       setValidationMessage("ayarlar başarıyla kaydedildi");
       console.log("ayarlar kaydedildi", response);
-    } catch (error: any) {
+      setDatabaseActiveProvider(activeProvider);
+      await onSaved();
+    } catch {
       setNoticeType("error");
       console.error("ayarlar başarıyla kaydedilemedi");
       setValidationMessage("lütfen bağlantınızı kontrol edin");
@@ -304,49 +364,96 @@ export default function SettingsScreen({
             </label>
 
             <fieldset className="provider-fieldset">
-              <legend>Aktif provider</legend>
+              <legend>Yapay zekâ sağlayıcısı</legend>
+              <p className="provider-help">
+                Ana modelimiz isteği karşılayamadığında destek almak için devreye
+                girecek yapay zekâyı seçin. “Aktif” etiketi kayıtlı destek
+                sağlayıcısını gösterir.
+              </p>
               <div className="provider-options">
                 <label
-                  className={
-                    settings.activeProvider === "gemini" ? "selected" : ""
-                  }
+                  className={`provider-gemini ${
+                    activeProvider === "gemini" ? "selected" : ""
+                  } ${
+                    databaseActiveProvider === "gemini"
+                      ? "database-active"
+                      : ""
+                  }`}
                 >
                   <input
                     type="radio"
                     name="provider"
-                    checked={settings.activeProvider === "gemini"}
+                    checked={activeProvider === "gemini"}
                     onChange={() => updateSetting("activeProvider", "gemini")}
                   />
                   <strong>Gemini</strong>
                   <small>Google Gemini API</small>
+                  {databaseActiveProvider === "gemini" && (
+                    <span className="active-provider-badge">Aktif</span>
+                  )}
                 </label>
                 <label
-                  className={
-                    settings.activeProvider === "llama" ? "selected" : ""
-                  }
+                  className={`provider-llama ${
+                    activeProvider === "llama" ? "selected" : ""
+                  } ${
+                    databaseActiveProvider === "llama"
+                      ? "database-active"
+                      : ""
+                  }`}
                 >
                   <input
                     type="radio"
                     name="provider"
-                    checked={settings.activeProvider === "llama"}
+                    checked={activeProvider === "llama"}
                     onChange={() => updateSetting("activeProvider", "llama")}
                   />
                   <strong>Llama</strong>
                   <small>Yerel Ollama servisi</small>
+                  {databaseActiveProvider === "llama" && (
+                    <span className="active-provider-badge">Aktif</span>
+                  )}
                 </label>
                 <label
-                  className={
-                    settings.activeProvider === "openai" ? "selected" : ""
-                  }
+                  className={`provider-openai ${
+                    activeProvider === "openai" ? "selected" : ""
+                  } ${
+                    databaseActiveProvider === "openai"
+                      ? "database-active"
+                      : ""
+                  }`}
                 >
                   <input
                     type="radio"
                     name="provider"
-                    checked={settings.activeProvider === "openai"}
+                    checked={activeProvider === "openai"}
                     onChange={() => updateSetting("activeProvider", "openai")}
                   />
                   <strong>OpenAI / ChatGPT</strong>
                   <small>OpenAI API</small>
+                  {databaseActiveProvider === "openai" && (
+                    <span className="active-provider-badge">Aktif</span>
+                  )}
+                </label>
+                <label
+                  className={`provider-deepseek ${
+                    activeProvider === "deepseek" ? "selected" : ""
+                  } ${
+                    databaseActiveProvider === "deepseek"
+                      ? "database-active"
+                      : ""
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="provider"
+                    checked={activeProvider === "deepseek"}
+                    onChange={() => updateSetting("activeProvider", "deepseek")}
+                  />
+                  <strong>DeepSeek</strong>
+                  <small>DeepSeek API</small>
+                  {databaseActiveProvider === "deepseek" && (
+                    <span className="active-provider-badge">Aktif</span>
+                  )}
                 </label>
               </div>
             </fieldset>
@@ -452,6 +559,38 @@ export default function SettingsScreen({
                     }
                     placeholder="Örn. gpt-4o-mini"
                   />
+                </label>
+              </div>
+            )}
+
+            {settings.activeProvider === "deepseek" && (
+              <div className="provider-settings">
+                <label className="settings-field">
+                  <span>DeepSeek API key</span>
+                  <input
+                    type={showSecrets ? "text" : "password"}
+                    value={settings.deepseekApiKey || ""}
+                    onChange={(e) =>
+                      updateSetting("deepseekApiKey", e.target.value)
+                    }
+                    placeholder="sk-..."
+                    autoComplete="off"
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>DeepSeek model</span>
+                  <select
+                    value={settings.deepseekModel || ""}
+                    onChange={(e) =>
+                      updateSetting("deepseekModel", e.target.value)
+                    }
+                  >
+                    <option value="">Model seç</option>
+                    <option value="deepseek-v4-flash">
+                      deepseek-v4-flash
+                    </option>
+                    <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+                  </select>
                 </label>
               </div>
             )}

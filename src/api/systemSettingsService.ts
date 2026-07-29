@@ -15,6 +15,21 @@ export type PythonInputStatus = {
   message: string;
 };
 
+export const checkBackendStatus = async (): Promise<boolean> => {
+  try {
+    await apiClient.get<{ running?: boolean }>(
+      "/System/backend-status",
+      { timeout: 2000 },
+    );
+
+    return true;
+  } catch (error) {
+    // 4xx/5xx cevabı bile HTTP sunucusunun erişilebilir olduğunu gösterir.
+    // Yalnızca hiç response alınamaması backend'in kapalı olduğu anlamına gelir.
+    return axios.isAxiosError(error) && Boolean(error.response);
+  }
+};
+
 export type CreateAsistanSettingsRequest = {
   redmineToken: string;
   wakeWord: string;
@@ -24,6 +39,9 @@ export type CreateAsistanSettingsRequest = {
   geminiModel: string;
   openAiApiKey: string;
   openAiModel: string;
+  deepseekApiKey: string;
+  deepseekModel: string;
+  deepseekBaseUrl: string;
   ollamaModel: string;
   voiceInputEnabled: boolean;
   aiFallbackProvider: string;
@@ -41,10 +59,18 @@ export type AsistanSettingsResponse = {
   wakeWord?: string;
   deadWord?: string;
   activeProvider?: string;
+  ActiveProvider?: string;
+  active_provider?: string;
   geminiApiKey?: string;
   geminiModel?: string;
   openAiApiKey?: string;
   openAiModel?: string;
+  deepseekApiKey?: string;
+  deepseekModel?: string;
+  deepseekBaseUrl?: string;
+  deepseek_api_key?: string;
+  deepseek_model?: string;
+  deepseek_base_url?: string;
   ollamaModel?: string;
   voiceInputEnabled?: boolean;
   aiFallbackProvider?: string;
@@ -120,6 +146,48 @@ export const checkPythonInputStatus = async (): Promise<PythonInputStatus> => {
 
   return response.data;
 };
+
+export type RunPythonResponse = {
+  output?: string;
+};
+
+export const runPython = async (): Promise<RunPythonResponse> => {
+  const response = await apiClient.post<RunPythonResponse>(
+    "/Python/run-python",
+  );
+
+  return response.data;
+};
+
+export type StopPythonResponse = {
+  output?: string;
+};
+
+export const stopPython = async (): Promise<StopPythonResponse> => {
+  const response = await apiClient.post<StopPythonResponse>(
+    "/Python/stop-python",
+  );
+
+  return response.data;
+};
+
+const serviceManagerUrl =
+  (import.meta.env.VITE_SERVICE_MANAGER_URL as string | undefined)?.replace(
+    /\/$/,
+    "",
+  ) ?? "/__service-manager";
+
+const callBackendManager = async (
+  operation: "start" | "stop" | "restart",
+): Promise<void> => {
+  await axios.post(`${serviceManagerUrl}/backend/${operation}`, undefined, {
+    timeout: 10_000,
+  });
+};
+
+export const startBackend = () => callBackendManager("start");
+export const stopBackend = () => callBackendManager("stop");
+export const restartBackend = () => callBackendManager("restart");
 
 type SaveFilePickerWindow = Window & {
   showSaveFilePicker?: (options: {

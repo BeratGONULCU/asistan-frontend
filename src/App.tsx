@@ -11,8 +11,14 @@ import { AsistanYanitTuru } from "./api/asistanChatService";
 import { handleApiError } from "./api/apiErrorHandler";
 import SettingsScreen, { type AppSettings } from "./screens/SettingsScreen";
 import {
+  checkBackendStatus,
   checkPythonInputStatus,
   GetAllAssistanSetting,
+  restartBackend,
+  runPython,
+  startBackend,
+  stopBackend,
+  stopPython,
   type AsistanSettingsResponse,
 } from "./api/systemSettingsService";
 
@@ -58,27 +64,23 @@ const DEFAULT_SETTINGS: AppSettings = {
   geminiModel: "gemini-2.5-flash",
   openAiApiKey: "",
   openAiModel: "gpt-4o-mini",
+  deepseekApiKey: "",
+  deepseekModel: "deepseek-v4-flash",
   ollamaModel: "llama3.1:8b",
   voiceInputEnabled: false,
-};
-
-const loadSettings = (): AppSettings => {
-  try {
-    const saved = JSON.parse(localStorage.getItem("asistan-settings") ?? "{}") as Partial<AppSettings> & { activeProvider?: string };
-    return {
-      ...DEFAULT_SETTINGS,
-      ...saved,
-      activeProvider: saved.activeProvider === "llama" ? "llama" : (saved.activeProvider ?? DEFAULT_SETTINGS.activeProvider) as AppSettings["activeProvider"],
-    };
-  } catch {
-    return DEFAULT_SETTINGS;
-  }
 };
 
 const mapDatabaseSettings = (
   saved: AsistanSettingsResponse,
 ): AppSettings => {
-  const provider = saved.activeProvider?.toLowerCase();
+  const provider = (
+    saved.activeProvider ??
+    saved.ActiveProvider ??
+    saved.active_provider ??
+    ""
+  )
+    .trim()
+    .toLowerCase();
 
   return {
     ...DEFAULT_SETTINGS,
@@ -86,13 +88,21 @@ const mapDatabaseSettings = (
     wakeWord: saved.wakeWord ?? DEFAULT_SETTINGS.wakeWord,
     deadWord: saved.deadWord ?? DEFAULT_SETTINGS.deadWord,
     activeProvider:
-      provider === "llama" || provider === "openai" || provider === "gemini"
+      provider === "llama" ||
+      provider === "openai" ||
+      provider === "gemini" ||
+      provider === "deepseek"
         ? provider
         : DEFAULT_SETTINGS.activeProvider,
     geminiApiKey: saved.geminiApiKey ?? "",
     geminiModel: saved.geminiModel ?? DEFAULT_SETTINGS.geminiModel,
     openAiApiKey: saved.openAiApiKey ?? "",
     openAiModel: saved.openAiModel ?? DEFAULT_SETTINGS.openAiModel,
+    deepseekApiKey: saved.deepseekApiKey ?? saved.deepseek_api_key ?? "",
+    deepseekModel:
+      saved.deepseekModel ??
+      saved.deepseek_model ??
+      DEFAULT_SETTINGS.deepseekModel,
     ollamaModel: saved.ollamaModel ?? DEFAULT_SETTINGS.ollamaModel,
     voiceInputEnabled:
       saved.voiceInputEnabled ?? DEFAULT_SETTINGS.voiceInputEnabled,
@@ -133,10 +143,20 @@ function App() {
   );
   const [screen, setScreen] = useState<"home" | "sessions" | "settings">("home");
   const [previousScreen, setPreviousScreen] = useState<"home" | "sessions">("home");
-  const [settings, setSettings] = useState<AppSettings>(loadSettings);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [settingsWarning, setSettingsWarning] = useState(
+    "Asistan ayarları kontrol ediliyor.",
+  );
   const [pythonInputStatus, setPythonInputStatus] = useState<
-    "checking" | "running" | "stopped"
+    "checking" | "starting" | "stopping" | "restarting" | "running" | "stopped"
   >("checking");
+  const [backendStatus, setBackendStatus] = useState<
+    "checking" | "starting" | "stopping" | "restarting" | "running" | "stopped"
+  >("checking");
+  const backendActionInProgressRef = useRef(false);
+  const pythonStartPromptShownRef = useRef(false);
+  const pythonStartInProgressRef = useRef(false);
   const [currentSessionId, setCurrentSessionId] = useState<number | null>(null);
   const [waitingExplanation, setWaitingExplanation] = useState(false);
   type WaitingFor = "TASK_ID" | "ACIKLAMA" | "SEARCH" | null;
@@ -156,19 +176,348 @@ function App() {
 
   const [uiError, setUiError] = useState<UiError | null>(null);
 
-  useEffect(() => {
-    localStorage.setItem("asistan-settings", JSON.stringify(settings));
-  }, [settings]);
+  const waitForPythonStatus = async (
+    expectedRunning: boolean,
+    timeoutMs = 90_000,
+  ) => {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      try {
+        const status = await checkPythonInputStatus();
+        if (status.running === expectedRunning) return true;
+      } catch {
+        if (!expectedRunning) return true;
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+
+    return false;
+  };
+
+  const waitForBackendStatus = async (
+    expectedRunning: boolean,
+    timeoutMs = 90_000,
+  ) => {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const running = await checkBackendStatus();
+      if (running === expectedRunning) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+
+    return false;
+  };
+
+  const showServiceError = (title: string, error: unknown) => {
+    setUiError({
+      title,
+      message:
+        error instanceof Error
+          ? error.message
+          : "Servis yönetimi sırasında beklenmeyen bir hata oluştu.",
+    });
+  };
+
+  const handleStartBackend = async () => {
+    if (backendActionInProgressRef.current) return false;
+    backendActionInProgressRef.current = true;
+    setBackendStatus("starting");
+
+    try {
+      await startBackend();
+      if (!(await waitForBackendStatus(true))) {
+        throw new Error("Backend belirtilen sürede hazır olmadı.");
+      }
+      setBackendStatus("running");
+      return true;
+    } catch (error) {
+      setBackendStatus("stopped");
+      showServiceError("Backend başlatılamadı", error);
+      return false;
+    } finally {
+      backendActionInProgressRef.current = false;
+    }
+  };
+
+  const handleStopBackend = async () => {
+    if (backendActionInProgressRef.current) return;
+    backendActionInProgressRef.current = true;
+    setBackendStatus("stopping");
+
+    try {
+      await stopBackend();
+      if (!(await waitForBackendStatus(false))) {
+        throw new Error("Backend belirtilen sürede kapanmadı.");
+      }
+      setBackendStatus("stopped");
+      setPythonInputStatus("stopped");
+    } catch (error) {
+      setBackendStatus((await checkBackendStatus()) ? "running" : "stopped");
+      showServiceError("Backend durdurulamadı", error);
+    } finally {
+      backendActionInProgressRef.current = false;
+    }
+  };
+
+  const handleRestartBackend = async () => {
+    if (backendActionInProgressRef.current) return;
+    backendActionInProgressRef.current = true;
+    setBackendStatus("restarting");
+
+    try {
+      await restartBackend();
+      if (!(await waitForBackendStatus(true))) {
+        throw new Error("Backend yeniden başlatıldı ancak hazır olmadı.");
+      }
+      setBackendStatus("running");
+    } catch (error) {
+      setBackendStatus((await checkBackendStatus()) ? "running" : "stopped");
+      showServiceError("Backend yeniden başlatılamadı", error);
+    } finally {
+      backendActionInProgressRef.current = false;
+    }
+  };
+
+  const handleStartPython = async () => {
+    if (pythonStartInProgressRef.current) {
+      return waitForPythonStatus(true);
+    }
+
+    pythonStartPromptShownRef.current = true;
+    pythonStartInProgressRef.current = true;
+    setPythonInputStatus("starting");
+
+    try {
+      await runPython();
+      const started = await waitForPythonStatus(true);
+      if (!started) {
+        throw new Error("Python servisi belirtilen sürede hazır olmadı.");
+      }
+      setPythonInputStatus("running");
+      return true;
+    } catch (error) {
+      console.error("Python servisi başlatılamadı.", error);
+      setPythonInputStatus("stopped");
+      setUiError({
+        title: "Python başlatılamadı",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Python servisi başlatılırken hata oluştu.",
+      });
+      return false;
+    } finally {
+      pythonStartInProgressRef.current = false;
+    }
+  };
+
+  const ensurePythonRunningBeforeSend = async () => {
+    const backendIsRunning = await checkBackendStatus();
+    setBackendStatus(backendIsRunning ? "running" : "stopped");
+
+    if (!backendIsRunning) {
+      setUiError({
+        title: "Backend çalışmıyor",
+        message:
+          "Mesaj gönderilemedi. Backend servisini çalıştırıp tekrar deneyin.",
+      });
+      return false;
+    }
+
+    try {
+      const status = await checkPythonInputStatus();
+      if (status.running) {
+        setPythonInputStatus("running");
+        return true;
+      }
+    } catch {
+      setPythonInputStatus("stopped");
+    }
+
+    const shouldStart = window.confirm(
+      "Python servisi kapalı. Mesajı göndermeden önce servis açılsın mı?",
+    );
+
+    if (!shouldStart) return false;
+
+    return handleStartPython();
+  };
+
+  const handleStopPython = async () => {
+    if (pythonStartInProgressRef.current) return;
+
+    pythonStartPromptShownRef.current = true;
+    pythonStartInProgressRef.current = true;
+    setPythonInputStatus("stopping");
+
+    try {
+      await stopPython();
+      const stopped = await waitForPythonStatus(false);
+      if (!stopped) {
+        throw new Error("Python servisi belirtilen sürede kapanmadı.");
+      }
+      setPythonInputStatus("stopped");
+    } catch (error) {
+      console.error("Python servisi durdurulamadı.", error);
+      setPythonInputStatus("running");
+      setUiError({
+        title: "Python durdurulamadı",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Python servisi durdurulurken hata oluştu.",
+      });
+    } finally {
+      pythonStartInProgressRef.current = false;
+    }
+  };
+
+  const handleRestartPython = async () => {
+    if (pythonStartInProgressRef.current) return;
+
+    pythonStartPromptShownRef.current = true;
+    pythonStartInProgressRef.current = true;
+    setPythonInputStatus("restarting");
+
+    try {
+      const currentStatus = await checkPythonInputStatus().catch(() => ({
+        running: false,
+      }));
+
+      if (currentStatus.running) {
+        await stopPython();
+        const stopped = await waitForPythonStatus(false);
+        if (!stopped) {
+          throw new Error("Python servisi kapanmadığı için yeniden başlatılamadı.");
+        }
+      }
+
+      await runPython();
+      const started = await waitForPythonStatus(true);
+      if (!started) {
+        throw new Error("Python servisi yeniden başlatıldı ancak hazır olmadı.");
+      }
+
+      setPythonInputStatus("running");
+    } catch (error) {
+      console.error("Python servisi yeniden başlatılamadı.", error);
+      const status = await checkPythonInputStatus().catch(() => ({
+        running: false,
+      }));
+      setPythonInputStatus(status.running ? "running" : "stopped");
+      setUiError({
+        title: "Python yeniden başlatılamadı",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Yeniden başlatma işlemi sırasında hata oluştu.",
+      });
+    } finally {
+      pythonStartInProgressRef.current = false;
+    }
+  };
+
+  const handleStartStoppedServices = async () => {
+    let backendRunning = await checkBackendStatus();
+
+    if (!backendRunning) {
+      backendRunning = await handleStartBackend();
+    }
+
+    if (!backendRunning) return;
+
+    const pythonRunning = await checkPythonInputStatus()
+      .then((status) => status.running)
+      .catch(() => false);
+
+    if (!pythonRunning) {
+      await handleStartPython();
+    }
+  };
+
+  const handleSettingsSaved = async () => {
+    try {
+      const response = await GetAllAssistanSetting();
+      const records = Array.isArray(response) ? response : [response];
+
+      if (records.length !== 1) {
+        if (records.length === 0) {
+          setSettings(DEFAULT_SETTINGS);
+        }
+        setSettingsReady(false);
+        setSettingsWarning(
+          records.length === 0
+            ? "Asistan ayar kaydı bulunamadı. Mesaj gönderebilmek için ayarları kaydedin."
+            : "Asistan ayarları tablosunda yalnızca bir kayıt bulunmalıdır.",
+        );
+        return;
+      }
+
+      setSettingsReady(true);
+      setSettingsWarning("");
+    } catch {
+      setSettingsReady(false);
+      setSettingsWarning(
+        "Asistan ayarları doğrulanamadı. Mesaj gönderimi devre dışı bırakıldı.",
+      );
+      return;
+    }
+
+    const shouldRestart = window.confirm(
+      "Ayarların işleme alınması için Python servisinin yeniden başlatılması gerekiyor. Şimdi yeniden başlatılsın mı?",
+    );
+
+    if (shouldRestart) {
+      await handleRestartPython();
+    }
+  };
 
   useEffect(() => {
     let isMounted = true;
 
     const refreshPythonInputStatus = async () => {
+      const backendIsRunning = await checkBackendStatus();
+      if (!isMounted) return;
+
+      if (!backendActionInProgressRef.current) {
+        setBackendStatus(backendIsRunning ? "running" : "stopped");
+      }
+      if (!backendIsRunning) {
+        if (!pythonStartInProgressRef.current) setPythonInputStatus("stopped");
+        return;
+      }
+
       try {
         const status = await checkPythonInputStatus();
-        if (isMounted) {
-          setPythonInputStatus(status.running ? "running" : "stopped");
+        if (!isMounted) return;
+
+        if (status.running) {
+          pythonStartPromptShownRef.current = false;
+          setPythonInputStatus("running");
+          return;
         }
+
+        if (pythonStartInProgressRef.current) return;
+        setPythonInputStatus("stopped");
+
+        if (
+          pythonStartPromptShownRef.current ||
+          pythonStartInProgressRef.current
+        ) {
+          return;
+        }
+
+        pythonStartPromptShownRef.current = true;
+        const shouldStart = window.confirm(
+          "Python servisi çalışmıyor. Şimdi çalıştırılsın mı?",
+        );
+
+        if (!shouldStart || !isMounted) return;
+
+        await handleStartPython();
       } catch {
         if (isMounted) setPythonInputStatus("stopped");
       }
@@ -181,6 +530,8 @@ function App() {
       isMounted = false;
       window.clearInterval(intervalId);
     };
+    // Python durumu yalnızca mount sırasında başlatılan tek bir polling döngüsüyle izlenir.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -204,16 +555,32 @@ function App() {
       try {
         const response = await GetAllAssistanSetting();
         const records = Array.isArray(response) ? response : [response];
-        const saved = records.at(-1);
+        const saved = records.length === 1 ? records[0] : null;
 
         if (isMounted && saved) {
           setSettings(mapDatabaseSettings(saved));
+          setSettingsReady(true);
+          setSettingsWarning("");
+        } else if (isMounted) {
+          setSettings(DEFAULT_SETTINGS);
+          setSettingsReady(false);
+          setSettingsWarning(
+            records.length === 0
+              ? "Asistan ayar kaydı bulunamadı. Mesaj gönderebilmek için Ayarlar ekranından kayıt oluşturun."
+              : "Asistan ayarları tablosunda birden fazla kayıt var. Yalnızca bir kayıt bırakılmalıdır.",
+          );
         }
       } catch (error) {
         console.error(
           "Veritabanındaki ayarlar yüklenemedi; yerel ayarlar kullanılacak.",
           error,
         );
+        if (isMounted) {
+          setSettingsReady(false);
+          setSettingsWarning(
+            "Asistan ayarları alınamadı. Mesaj gönderimi devre dışı bırakıldı.",
+          );
+        }
       }
     };
 
@@ -224,9 +591,31 @@ function App() {
     };
   }, []);
 
-  const openSettings = () => {
+  const openSettings = async () => {
     if (screen !== "settings") setPreviousScreen(screen);
-    setScreen("settings");
+
+    try {
+      const response = await GetAllAssistanSetting();
+      const records = Array.isArray(response) ? response : [response];
+      const saved = records.at(-1);
+
+      if (saved) {
+        setSettings(mapDatabaseSettings(saved));
+      } else {
+        setSettings(DEFAULT_SETTINGS);
+        setSettingsReady(false);
+        setSettingsWarning(
+          "Asistan ayar kaydı bulunamadı. Mesaj gönderebilmek için ayarları kaydedin.",
+        );
+      }
+    } catch (error) {
+      console.error(
+        "Ayarlar ekranı açılırken veritabanı ayarları yenilenemedi.",
+        error,
+      );
+    } finally {
+      setScreen("settings");
+    }
   };
 
   // # ID gerektirmeyen ve ek parametre gerektirmeyen işlemler listesi
@@ -505,10 +894,23 @@ function App() {
     const trimmedMessage = message.trim();
 
     if (!trimmedMessage || isProcessing) return;
+    if (!settingsReady) {
+      setUiError({
+        title: "Asistan ayarları eksik",
+        message: settingsWarning,
+      });
+      return;
+    }
+
+    setIsProcessing(true);
+    const pythonIsReady = await ensurePythonRunningBeforeSend();
+    if (!pythonIsReady) {
+      setIsProcessing(false);
+      return;
+    }
 
     addMessage("user", trimmedMessage);
     setMessage("");
-    setIsProcessing(true);
     const requestController = new AbortController();
     requestAbortControllerRef.current = requestController;
 
@@ -602,8 +1004,57 @@ function App() {
     }
   };
 
-  const handleCancelRequest = () => {
+  const handleCancelRequest = async () => {
+    if (!isProcessing) return;
+
     requestAbortControllerRef.current?.abort();
+    requestAbortControllerRef.current = null;
+
+    const deadWord = settings.deadWord.trim();
+    if (!deadWord) {
+      setIsProcessing(false);
+      setUiError({
+        title: "İptal mesajı gönderilemedi",
+        message: "Veritabanında dead word tanımlı değil.",
+      });
+      return;
+    }
+
+    addMessage("user", deadWord);
+
+    try {
+      const result = await sendAsistanChatMessage(
+        deadWord,
+        AsistanYanitTuru.KOMUT,
+        currentSessionId,
+      );
+
+      if (!result.ok) {
+        throw new Error(result.message || "İptal mesajı işlenemedi.");
+      }
+
+      setCurrentSessionId(result.sessionId);
+      addMessage(
+        "system",
+        formatAssistantResponse(result.assistantResponse) ||
+          result.message ||
+          "Aktif işlem için iptal sinyali gönderildi.",
+      );
+      setWaitingFor(null);
+      setPendingRedmineAction(null);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "İptal mesajı backend'e gönderilemedi.";
+      setUiError({
+        title: "İşlem iptal edilemedi",
+        message,
+      });
+      addMessage("system", `İptal hatası: ${message}`);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const handleNewChat = () => {
@@ -742,8 +1193,8 @@ function App() {
 
   const handleConfirmNo = async () => {
     if (!pendingResult) return;
-    // Burada istersen backend'e yanlÄ±ÅŸ cevap logu atabilirsin.
-    // Ã–rnek:
+    // Burada istersen backend'e yanlıştı cevap logu atabilirsin.
+    // Örnek:
     // await apiClient.post('/assistant/confirm', {
     //   userInput: pendingResult.userInput,
     //   generatedAnswer: pendingResult.generatedAnswer,
@@ -780,21 +1231,135 @@ function App() {
     }
   };
 
+  const systemIsHealthy =
+    backendStatus === "running" && pythonInputStatus === "running";
+  const systemStatusClass =
+    backendStatus === "stopped"
+      ? "stopped"
+      : backendStatus === "checking"
+        ? "checking"
+        : backendStatus === "starting" ||
+            backendStatus === "stopping" ||
+            backendStatus === "restarting"
+          ? backendStatus
+        : pythonInputStatus;
+  const systemStatusText =
+    backendStatus === "stopped"
+      ? "Backend çalışmıyor"
+      : backendStatus === "checking"
+        ? "Sistem kontrol ediliyor"
+        : backendStatus === "starting"
+          ? "Backend açılıyor, lütfen bekleyin…"
+          : backendStatus === "stopping"
+            ? "Backend durduruluyor"
+            : backendStatus === "restarting"
+              ? "Backend yeniden başlatılıyor"
+        : pythonInputStatus === "starting"
+          ? "Python açılıyor, lütfen bekleyin…"
+          : pythonInputStatus === "stopping"
+            ? "Python durduruluyor"
+            : pythonInputStatus === "restarting"
+              ? "Python yeniden başlatılıyor"
+              : pythonInputStatus === "stopped"
+                ? "Python çalışmıyor"
+                : "";
+
   return (
     <main className="assistant-page">
-      <div
-        className={`python-service-status ${pythonInputStatus}`}
-        role="status"
-        title="127.0.0.1:8766 Python giriş servisi"
-      >
-        <i aria-hidden="true"></i>
-        <span>
-          {pythonInputStatus === "checking"
-            ? "Python kontrol ediliyor"
-            : pythonInputStatus === "running"
-              ? "Python çalışıyor"
-              : "Python çalışmıyor"}
-        </span>
+      <div className="python-service-control">
+        <div
+          className={`python-service-status ${systemStatusClass} ${
+            systemIsHealthy ? "system-healthy" : ""
+          }`}
+          role="status"
+          aria-label={systemIsHealthy ? "Sistem çalışıyor" : systemStatusText}
+          title={systemIsHealthy ? "Backend ve Python çalışıyor" : systemStatusText}
+        >
+          <i aria-hidden="true"></i>
+          {!systemIsHealthy && <span>{systemStatusText}</span>}
+        </div>
+        <div className="python-service-actions">
+          <button
+            type="button"
+            onClick={handleStartStoppedServices}
+            title="Kapalı olan Backend ve/veya Python servisini aç"
+            aria-label="Kapalı servisleri aç"
+            disabled={
+              systemIsHealthy ||
+              backendStatus === "checking" ||
+              backendStatus === "starting" ||
+              backendStatus === "stopping" ||
+              backendStatus === "restarting" ||
+              pythonInputStatus === "starting" ||
+              pythonInputStatus === "stopping" ||
+              pythonInputStatus === "restarting"
+            }
+          >
+            Aç
+          </button>
+          <div className="service-action-menu">
+            <button type="button" aria-haspopup="true" title="Kapatılacak servisi seç">
+              Kapat
+            </button>
+            <div className="service-action-submenu">
+              <button
+                type="button"
+                onClick={handleStopBackend}
+                disabled={backendStatus !== "running"}
+                title="Backend servisini kapat"
+              >
+                Backend
+              </button>
+              <button
+                type="button"
+                onClick={handleStopPython}
+                disabled={
+                  backendStatus !== "running" ||
+                  pythonInputStatus !== "running"
+                }
+                title="Python servisini kapat"
+              >
+                Python
+              </button>
+            </div>
+          </div>
+          <div className="service-action-menu">
+            <button
+              type="button"
+              aria-haspopup="true"
+              title="Yeniden başlatılacak servisi seç"
+            >
+              Restart
+            </button>
+            <div className="service-action-submenu">
+              <button
+                type="button"
+                onClick={handleRestartBackend}
+                disabled={
+                  backendStatus === "checking" ||
+                  backendStatus === "starting" ||
+                  backendStatus === "stopping" ||
+                  backendStatus === "restarting"
+                }
+                title="Backend servisini yeniden başlat"
+              >
+                Backend
+              </button>
+              <button
+                type="button"
+                onClick={handleRestartPython}
+                disabled={
+                  backendStatus !== "running" ||
+                  (pythonInputStatus !== "running" &&
+                    pythonInputStatus !== "stopped")
+                }
+                title="Python servisini yeniden başlat"
+              >
+                Python
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
       <button
         type="button"
@@ -808,20 +1373,32 @@ function App() {
           <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.95 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.58 15 1.7 1.7 0 0 0 3 14H3v-4h.08A1.7 1.7 0 0 0 4.6 8.95a1.7 1.7 0 0 0-.34-1.88L4.2 7l2.83-2.83.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 10 3.02V3h4v.08a1.7 1.7 0 0 0 1.05 1.52 1.7 1.7 0 0 0 1.88-.34l.06-.06L19.82 7l-.06.06a1.7 1.7 0 0 0-.34 1.88A1.7 1.7 0 0 0 21 10h.02v4h-.08A1.7 1.7 0 0 0 19.4 15Z" />
         </svg>
       </button>
+      {settingsWarning && (
+        <div className="settings-required-warning" role="alert">
+          {settingsWarning}
+        </div>
+      )}
       {screen === "home" && (
         <div>
           <HomeScreen onOpenSessions={() => setScreen("sessions")} />
         </div>
       )}
-      {screen === "sessions" && (
-        <AsistanSessionsScreen onHome={() => setScreen("home")} />
-      )}
+      <div hidden={screen !== "sessions"}>
+        <AsistanSessionsScreen
+          onHome={() => setScreen("home")}
+          ensurePythonRunning={ensurePythonRunningBeforeSend}
+          deadWord={settings.deadWord}
+          settingsReady={settingsReady}
+          settingsWarning={settingsWarning}
+        />
+      </div>
       {screen === "settings" && (
         <SettingsScreen
           settings={settings}
           onChange={setSettings}
           onBack={() => setScreen(previousScreen)}
           onReset={() => setSettings(DEFAULT_SETTINGS)}
+          onSaved={handleSettingsSaved}
         />
       )}
 
@@ -1022,7 +1599,7 @@ function App() {
               type="button"
               className={isListening ? "mic-button active" : "mic-button"}
               onClick={handleMicClick}
-              disabled={!settings.voiceInputEnabled}
+              disabled={!settings.voiceInputEnabled || !settingsReady}
               aria-label={
                 settings.voiceInputEnabled
                   ? "Mikrofonu başlat"
@@ -1048,6 +1625,7 @@ function App() {
               type="button"
               className="keyboard-button"
               onClick={handleKeyboardClick}
+              disabled={!settingsReady}
               aria-label="Klavye ile yaz"
             >
               <svg
@@ -1074,16 +1652,21 @@ function App() {
                     ? "Göreve yazılacak açıklamayı yaz..."
                     : pendingResult
                       ? "Önce cevabı doğru/yanlış olarak işaretle"
-                      : "Komut yaz... örn: 29198 nolu taskın açıklamasını değiştirmek istiyorum"
+                      : "Komut yaz... örn: 29198 nolu taska açıklama ekle"
               }
-              disabled={isProcessing || !!pendingResult}
+              disabled={isProcessing || !!pendingResult || !settingsReady}
             />
 
             <button
               type="button"
               className="send-button"
               onClick={handleSessionSend}
-              disabled={!message.trim() || isProcessing || !!pendingResult}
+              disabled={
+                !message.trim() ||
+                isProcessing ||
+                !!pendingResult ||
+                !settingsReady
+              }
             >
               Gönder
             </button>
@@ -1093,7 +1676,7 @@ function App() {
                 type="button"
                 className="close-button"
                 onClick={() => {
-                  handleCancelRequest();
+                  if (isProcessing) void handleCancelRequest();
                   setKeyboardMode(false);
                   setMessage("");
                   void handleCancelSession(); // burada session iptali olacak ve sohbet kapatılacak. sphbet mesajı attığında eğer ki session kapalı ise açıcak.
@@ -1106,7 +1689,7 @@ function App() {
               <button
                 type="button"
                 className="stop-button"
-                onClick={handleCancelRequest}
+                onClick={() => void handleCancelRequest()}
                 disabled={!isProcessing}
                 aria-label="İsteği iptal et"
                 title={isProcessing ? "İsteği iptal et" : "Aktif istek yok"}
