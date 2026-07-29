@@ -3,11 +3,13 @@ import { createPortal } from "react-dom";
 
 import {
   AsistanYanitTuru,
-  sendAsistanConfirmationAnswer,
   sendAsistanChatMessage,
 } from "../api/asistanChatService";
-import { cancelSession } from "../api/asistanCancelService";
-import { deleteAsistanSession } from "../api/asistanYanitService";
+import {
+  archiveAsistanSession,
+  deleteAsistanSession,
+  unarchiveAsistanSession,
+} from "../api/asistanYanitService";
 
 import "../style/AsistanSessionsScreen.css";
 
@@ -16,22 +18,47 @@ type AsistanYanit = {
   asistanYanit: string;
   yanitTuru: string;
   komutId: number | null;
-  sessionID: string;
+  sessionID?: string | number;
+  sessionId?: string | number;
+  SessionID?: string | number;
   createdAt?: string;
   tarihSaat?: string;
   jsonData?: unknown;
   JsonData?: unknown;
+  isArchived?: boolean | string | number;
+  IsArchived?: boolean | string | number;
+  is_archived?: boolean | string | number;
 };
 
+const getSessionId = (item: AsistanYanit) =>
+  String(item.sessionID ?? item.sessionId ?? item.SessionID ?? "").trim();
+
 type SessionGroup = {
+  sessionID: number;
   sessionId: string;
   title: string;
   messages: AsistanYanit[];
+  isArchived: boolean;
 };
 
 type TruncatedMessage = {
   text: string;
   isTruncated: boolean;
+};
+
+const isArchivedMessage = (item: AsistanYanit) => {
+  const value =
+    item.isArchived ??
+    item.IsArchived ??
+    item.is_archived ??
+    false;
+
+  return (
+    value === true ||
+    value === 1 ||
+    (typeof value === "string" &&
+      (value.trim().toLowerCase() === "true" || value.trim() === "1"))
+  );
 };
 
 const FIELD_LABELS: Record<string, string> = {
@@ -171,9 +198,19 @@ const renderReadableValue = (value: unknown): ReactNode => {
 
 type Props = {
   onHome: () => void;
+  ensurePythonRunning: () => Promise<boolean>;
+  deadWord: string;
+  settingsReady: boolean;
+  settingsWarning: string;
 };
 
-export default function AsistanSessionsScreen({ onHome }: Props) {
+export default function AsistanSessionsScreen({
+  onHome,
+  ensurePythonRunning,
+  deadWord,
+  settingsReady,
+  settingsWarning,
+}: Props) {
   const [data, setData] = useState<AsistanYanit[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -192,7 +229,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   const [modalDateTo, setModalDateTo] = useState("");
   const [isCopied, setIsCopied] = useState(false);
   const [sessionSearch, setSessionSearch] = useState("");
-  const [archivedSessionIds, setArchivedSessionIds] = useState<string[]>([]);
+  const [showArchivedSessions, setShowArchivedSessions] = useState(false);
   const [openSessionMenuId, setOpenSessionMenuId] = useState<string | null>(null);
   const [sessionMenuPosition, setSessionMenuPosition] = useState({
     top: 0,
@@ -210,6 +247,9 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   >(null);
   const [newMessageCount, setNewMessageCount] = useState(0);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [archivingSessionId, setArchivingSessionId] = useState<string | null>(
+    null,
+  );
 
   // bu kısım smoothscroll olduğunda nereye gideceğini göstermek için
   const chatEndRef = useRef<HTMLDivElement | null>(null);
@@ -246,26 +286,66 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
         setError("");
       }
 
-      // burada tarayıcı cache kapatıldı ve eski kayıtların ekranda kalmasının önüne geçildi
-      const response = await fetch(
-        "http://localhost:5131/Api/AsistanYanit/Get-All",
-        { cache: "no-store" },
-      );
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      // Aktif ve arşivlenmiş sohbetler backend'deki ayrı kaynaklardan alınır.
+      const [activeResponse, archivedResponse] = await Promise.all([
+        fetch("http://localhost:5131/Api/AsistanYanit/Get-All", {
+          cache: "no-store",
+        }),
+        fetch(
+          "http://localhost:5131/Api/AsistanYanit/Get-Archived-Sohbet",
+          { cache: "no-store" },
+        ),
+      ]);
+      if (!activeResponse.ok) {
+        throw new Error(`Aktif sohbetler alınamadı (HTTP ${activeResponse.status}).`);
+      }
+      if (!archivedResponse.ok) {
+        throw new Error(
+          `Arşivlenmiş sohbetler alınamadı (HTTP ${archivedResponse.status}).`,
+        );
       }
 
-      const result = await response.json();
-      const items: AsistanYanit[] = Array.isArray(result)
-        ? result
-        : (result?.data ?? result ?? []);
+      const [activeResult, archivedResult] = await Promise.all([
+        activeResponse.json(),
+        archivedResponse.json(),
+      ]);
+      const activeItems: AsistanYanit[] = Array.isArray(activeResult)
+        ? activeResult
+        : (activeResult?.data ?? activeResult ?? []);
+      const archivedItems: AsistanYanit[] = Array.isArray(archivedResult)
+        ? archivedResult
+        : (archivedResult?.data ?? archivedResult ?? []);
+      const itemMap = new Map<string, AsistanYanit>();
+
+      for (const item of activeItems) {
+        itemMap.set(`${getSessionId(item)}:${item.id}`, {
+          ...item,
+          isArchived: false,
+          IsArchived: false,
+          is_archived: false,
+        });
+      }
+      for (const item of archivedItems) {
+        itemMap.set(`${getSessionId(item)}:${item.id}`, {
+          ...item,
+          isArchived: true,
+          IsArchived: true,
+          is_archived: true,
+        });
+      }
+      const items = [...itemMap.values()];
 
       setData(items);
 
       if (preferredSessionId) {
         setSelectedSessionId(preferredSessionId);
       } else if (items.length > 0) {
-        setSelectedSessionId(items[0].sessionID ?? null);
+        const firstActiveItem = items.find(
+          (item) => !isArchivedMessage(item),
+        );
+        setSelectedSessionId(
+          firstActiveItem ? getSessionId(firstActiveItem) || null : null,
+        );
       }
     } catch (err) {
       if (!silent) {
@@ -332,13 +412,17 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   const groupedSessions = useMemo<SessionGroup[]>(() => {
     const map = data.reduce(
       (acc, item) => {
-        const key = String(item.sessionID ?? "unknown");
+        const key = getSessionId(item);
+        const sessionID = Number(key);
+        if (!Number.isInteger(sessionID) || sessionID <= 0) return acc;
 
         if (!acc[key]) {
           acc[key] = {
+            sessionID,
             sessionId: key,
             title: "",
             messages: [item],
+            isArchived: false,
           };
         } else {
           acc[key].messages.push(item);
@@ -365,6 +449,8 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       return {
         ...session,
         messages,
+        isArchived:
+          messages.length > 0 && messages.some(isArchivedMessage),
         title:
           firstCommand?.asistanYanit.trim().replace(/\s+/g, " ") ||
           `Sohbet #${session.sessionId}`,
@@ -386,7 +472,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     groupedSessions.find((s) => s.sessionId === selectedSessionId) ?? null;
   const normalizedSessionSearch = sessionSearch.trim().toLocaleLowerCase("tr-TR");
   const filteredSessions = groupedSessions.filter((session) => {
-    if (archivedSessionIds.includes(session.sessionId)) return false;
+    if (session.isArchived !== showArchivedSessions) return false;
     if (!normalizedSessionSearch) return true;
 
     const lastMessage = session.messages[session.messages.length - 1];
@@ -394,6 +480,14 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       .toLocaleLowerCase("tr-TR")
       .includes(normalizedSessionSearch);
   });
+  const filteredRecordCount = filteredSessions.reduce(
+    (total, session) => total + session.messages.length,
+    0,
+  );
+  const openMenuSession =
+    groupedSessions.find(
+      (session) => session.sessionId === openSessionMenuId,
+    ) ?? null;
   const visibleSessions = filteredSessions.slice(0, visibleSessionCount);
   const shouldLimitMessageList = (selectedSession?.messages.length ?? 0) > 8;
   const messageListStyle = shouldLimitMessageList
@@ -523,11 +617,49 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     previousMessageCountRef.current = 0;
   };
 
-  const handleArchiveSession = (sessionId: string) => {
-    setArchivedSessionIds((ids) => [...ids, sessionId]);
-    setOpenSessionMenuId(null);
-    if (selectedSessionId === sessionId) {
-      setSelectedSessionId(null);
+  const handleArchiveSession = async (
+    session: SessionGroup,
+    archive: boolean,
+  ) => {
+    const { sessionID, sessionId } = session;
+    if (!Number.isInteger(sessionID) || sessionID <= 0) {
+      setError("Geçerli bir session ID bulunamadı.");
+      return;
+    }
+
+    try {
+      setArchivingSessionId(sessionId);
+      setError("");
+
+      if (archive) {
+        await archiveAsistanSession(sessionID);
+      } else {
+        await unarchiveAsistanSession(sessionID);
+      }
+      setData((items) =>
+        items.map((item) =>
+          getSessionId(item) === sessionId
+            ? {
+                ...item,
+                isArchived: archive,
+                IsArchived: archive,
+                is_archived: archive,
+              }
+            : item,
+        ),
+      );
+      setOpenSessionMenuId(null);
+      if (selectedSessionId === sessionId) setSelectedSessionId(null);
+    } catch (error) {
+      setError(
+        error instanceof Error
+          ? error.message
+          : archive
+            ? "Sohbet arşivlenemedi."
+            : "Sohbet arşivden kaldırılamadı.",
+      );
+    } finally {
+      setArchivingSessionId(null);
     }
   };
 
@@ -548,7 +680,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       setError("");
       await deleteAsistanSession(numericSessionId);
       setData((items) =>
-        items.filter((item) => String(item.sessionID) !== sessionId),
+        items.filter((item) => getSessionId(item) !== sessionId),
       );
       setOpenSessionMenuId(null);
       if (selectedSessionId === sessionId) setSelectedSessionId(null);
@@ -610,8 +742,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
     if (
       rawJson === null ||
-      rawJson === undefined ||
-      item.yanitTuru?.toUpperCase() !== AsistanYanitTuru.YANIT
+      rawJson === undefined
     ) {
       return rawJson;
     }
@@ -626,8 +757,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
     if (
       typeof type === "string" &&
-      type.trim() !== "" &&
-      type.trim().toLowerCase() !== "command"
+      type.trim().toLowerCase() === "chat"
     ) {
       return null;
     }
@@ -716,11 +846,11 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
   const getModalJsonSource = (item: AsistanYanit) => {
     const rawJson = getVisibleJsonData(item);
 
-    if (rawJson !== null && rawJson !== undefined) {
-      return formatAssistantResponse(rawJson);
+    if (rawJson === null || rawJson === undefined) {
+      return "";
     }
 
-    return "";
+    return formatAssistantResponse(rawJson);
   };
 
   const handleCopyModalContent = async () => {
@@ -853,11 +983,23 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     if (!trimmedMessage || !selectedSessionId || isSending) {
       return;
     }
+    if (!settingsReady) {
+      setSendError(settingsWarning);
+      return;
+    }
 
     const numericSessionId = Number(selectedSessionId);
 
     if (!Number.isInteger(numericSessionId) || numericSessionId <= 0) {
       setSendError("Geçerli bir session ID bulunamadı.");
+      return;
+    }
+
+    setIsSending(true);
+    setSendError("");
+    const pythonIsReady = await ensurePythonRunning();
+    if (!pythonIsReady) {
+      setIsSending(false);
       return;
     }
 
@@ -930,17 +1072,21 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
     setSendError("");
 
     try {
-      await sendAsistanConfirmationAnswer(
+      const result = await sendAsistanChatMessage(
         answer,
+        AsistanYanitTuru.ONAYYANIT,
         numericSessionId,
-        confirmation.jsonData ?? confirmation.JsonData,
       );
+
+      if (!result.ok) {
+        throw new Error(result.message || "Onay yanıtı işlenemedi.");
+      }
 
       setConfirmationAnswer((answers) => ({
         ...answers,
         [confirmation.id]: answer,
       }));
-      await loadSessions(selectedSessionId, true);
+      await loadSessions(String(result.sessionId), true);
     } catch (error) {
       setSendError(
         error instanceof Error
@@ -954,12 +1100,39 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
   const handleCancelMessage = async () => {
     sendAbortControllerRef.current?.abort();
-    setIsSending(false);
+    sendAbortControllerRef.current = null;
+
+    const cancelMessage = deadWord.trim();
+    if (!cancelMessage) {
+      setIsSending(false);
+      setSendError("Veritabanında dead word tanımlı değil.");
+      return;
+    }
 
     try {
-      await cancelSession();
-    } catch {
-      setSendError("İstek durduruldu ancak backend oturumu kapatılamadı.");
+      const numericSessionId = Number(selectedSessionId);
+      const result = await sendAsistanChatMessage(
+        cancelMessage,
+        AsistanYanitTuru.KOMUT,
+        Number.isInteger(numericSessionId) && numericSessionId > 0
+          ? numericSessionId
+          : null,
+      );
+
+      if (!result.ok) {
+        throw new Error(result.message || "İptal mesajı işlenemedi.");
+      }
+
+      setSendError("");
+      await loadSessions(String(result.sessionId), true);
+    } catch (error) {
+      setSendError(
+        error instanceof Error
+          ? error.message
+          : "İptal mesajı backend'e gönderilemedi.",
+      );
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -979,7 +1152,32 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
         <div className="sidebar-summary">
           <span>{filteredSessions.length} sohbet</span>
-          <span>{data.length} kayıt</span>
+          <span>{filteredRecordCount} kayıt</span>
+        </div>
+
+        <div className="session-view-tabs">
+          <button
+            type="button"
+            className={!showArchivedSessions ? "active" : ""}
+            onClick={() => {
+              setShowArchivedSessions(false);
+              setSelectedSessionId(null);
+              setVisibleSessionCount(5);
+            }}
+          >
+            Aktif sohbetler
+          </button>
+          <button
+            type="button"
+            className={showArchivedSessions ? "active" : ""}
+            onClick={() => {
+              setShowArchivedSessions(true);
+              setSelectedSessionId(null);
+              setVisibleSessionCount(5);
+            }}
+          >
+            Arşiv
+          </button>
         </div>
 
         <label className="session-search">
@@ -1089,15 +1287,6 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
             {visibleSessionCount >= filteredSessions.length
               ? "Daha az göster"
               : "Devamını gör"}
-          </button>
-        )}
-        {archivedSessionIds.length > 0 && (
-          <button
-            type="button"
-            className="session-archive-undo"
-            onClick={() => setArchivedSessionIds([])}
-          >
-            {archivedSessionIds.length} arşivleneni geri getir
           </button>
         )}
       </aside>
@@ -1354,14 +1543,27 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
                 value={message}
                 onChange={(event) => setMessage(event.target.value)}
                 onKeyDown={handleMessageKeyDown}
-                placeholder="Mesaj yaz..."
-                disabled={isSending}
+                placeholder={
+                  selectedSession?.isArchived
+                    ? "Arşivlenmiş sohbetlere mesaj gönderilemez."
+                    : "Mesaj yaz..."
+                }
+                disabled={
+                  isSending ||
+                  selectedSession?.isArchived ||
+                  !settingsReady
+                }
               />
 
               <button
                 type="button"
                 onClick={() => void handleSendMessage()}
-                disabled={!message.trim() || isSending}
+                disabled={
+                  !message.trim() ||
+                  isSending ||
+                  selectedSession?.isArchived ||
+                  !settingsReady
+                }
               >
                 Gönder
               </button>
@@ -1384,6 +1586,7 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
       </main>
 
       {openSessionMenuId &&
+        openMenuSession &&
         createPortal(
           <div
             className="session-card-menu session-card-menu-portal"
@@ -1394,9 +1597,19 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
           >
             <button
               type="button"
-              onClick={() => handleArchiveSession(openSessionMenuId)}
+              disabled={archivingSessionId === openSessionMenuId}
+              onClick={() =>
+                void handleArchiveSession(
+                  openMenuSession,
+                  !openMenuSession.isArchived,
+                )
+              }
             >
-              Sohbeti arşivle
+              {archivingSessionId === openSessionMenuId
+                ? "İşleniyor..."
+                : openMenuSession.isArchived
+                  ? "Arşivden kaldır"
+                  : "Sohbeti arşivle"}
             </button>
             <button
               type="button"
@@ -1434,23 +1647,25 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
               </div>
 
               <div className="message-modal-actions">
-                <button
-                  type="button"
-                  className="message-modal-filter-clear"
-                  onClick={() => {
-                    setModalSearch("");
-                    setModalDateFrom("");
-                    setModalDateTo("");
-                  }}
-                  disabled={!modalSearch && !modalDateFrom && !modalDateTo}
-                  aria-label="Filtreleri temizle"
-                  title="Filtreleri temizle"
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 5h16l-6 7v5l-4 2v-7L4 5Z" />
-                    <path d="m16 16 4 4m0-4-4 4" />
-                  </svg>
-                </button>
+                {getModalJsonSource(expandedMessage) && (
+                  <button
+                    type="button"
+                    className="message-modal-filter-clear"
+                    onClick={() => {
+                      setModalSearch("");
+                      setModalDateFrom("");
+                      setModalDateTo("");
+                    }}
+                    disabled={!modalSearch && !modalDateFrom && !modalDateTo}
+                    aria-label="Filtreleri temizle"
+                    title="Filtreleri temizle"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M4 5h16l-6 7v5l-4 2v-7L4 5Z" />
+                      <path d="m16 16 4 4m0-4-4 4" />
+                    </svg>
+                  </button>
+                )}
                 <button
                   type="button"
                   className="message-modal-copy"
@@ -1522,28 +1737,39 @@ export default function AsistanSessionsScreen({ onHome }: Props) {
 
                     {modalJson && (
                       <div className="modal-json-filters">
-                      <input
-                        type="text"
-                        value={modalSearch}
-                        onChange={(event) => setModalSearch(event.target.value)}
-                        placeholder="İçerikte ara..."
-                      />
+                        <label className="modal-filter-field">
+                          <span>İçerikte ara</span>
+                          <input
+                            type="text"
+                            value={modalSearch}
+                            onChange={(event) =>
+                              setModalSearch(event.target.value)
+                            }
+                            placeholder="Başlık, proje veya açıklama..."
+                          />
+                        </label>
 
-                      <input
-                        type="date"
-                        value={modalDateFrom}
-                        onChange={(event) =>
-                          setModalDateFrom(event.target.value)
-                        }
-                        placeholder="Baslangıç tarihi"
-                      />
+                        <label className="modal-filter-field">
+                          <span>Başlangıç tarihi</span>
+                          <input
+                            type="date"
+                            value={modalDateFrom}
+                            onChange={(event) =>
+                              setModalDateFrom(event.target.value)
+                            }
+                          />
+                        </label>
 
-                      <input
-                        type="date"
-                        value={modalDateTo}
-                        onChange={(event) => setModalDateTo(event.target.value)}
-                        placeholder="Bitiş tarihi"
-                      />
+                        <label className="modal-filter-field">
+                          <span>Bitiş tarihi</span>
+                          <input
+                            type="date"
+                            value={modalDateTo}
+                            onChange={(event) =>
+                              setModalDateTo(event.target.value)
+                            }
+                          />
+                        </label>
                       </div>
                     )}
 
